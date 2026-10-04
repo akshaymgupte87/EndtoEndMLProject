@@ -29,10 +29,10 @@ Ranking metrics and final test evaluation
 Saved model and item vectors for recommendation serving
 ```
 
-The mapping, sampling, model structure, and training-loop code now exist. We
-have generated mappings and run a bounded training experiment on the prepared
-`movies_tv_5m` splits. Ranking metrics, a larger/full-data training run, and
-serving artifacts remain later steps.
+The mapping, sampling, model structure, and training-loop code now exist.
+The mapping command has not yet been run on the project dataset, and the
+training loop has only been checked on synthetic interactions. Ranking metrics,
+real-data training, and serving artifacts remain later steps.
 
 ## Step 1: create model-ready integer IDs
 
@@ -55,8 +55,8 @@ It takes distinct IDs from the training split, sorts them, and assigns
 zero-based indices. Sorting makes the mapping deterministic: the same training
 IDs produce the same mapping regardless of the source row order. The mapping
 tables are written beside the encoded splits so future training and serving can
-translate indices back to original user and item IDs. We generated this
-artifact for `movies_tv_5m` in the first real-data run described below.
+translate indices back to original user and item IDs. The command exists, but
+this project has not yet generated its two-tower mapping artifact.
 
 ### Why mappings are fitted on training only
 
@@ -105,9 +105,9 @@ do not point it at the source split directory.
 
 Step 1 only defines the transformation that creates stable integer IDs and
 removes held-out pairs whose IDs are unknown to the training vocabulary. It
-does not train a network or compute recommendation metrics. Step 2 defines
-positive and negative examples; Steps 3 and 4 implement the model and training
-loop.
+does not train a network or compute recommendation metrics. This command has
+not yet been run on the project data. Step 2 defines positive and negative
+examples; Steps 3 and 4 implement the model and training loop.
 
 ### Verification checklist
 
@@ -122,109 +122,10 @@ When we run this step in a working Spark/Java environment, check that:
    match input counts minus excluded rows.
 6. Re-running from the same source data produces identical mappings.
 
-Spark could not initialize reliably in the Windows Python environment during
-earlier checks. This mapping run used WSL Ubuntu with Miniconda Python 3.11,
-PySpark 4.2.0, and Java 21. The full test suite has also now passed in that
-WSL environment; details are recorded below.
-
-### First run on the prepared 5M sample (2026-10-04)
-
-We ran `prepare_tower_data.py` from WSL against
-`data/processed/movies_tv_5m` and wrote the results to
-`data/processed/movies_tv_5m/two_tower/v1`. This folder did not exist before
-the run, so the job did not replace an earlier mapping output. The directory
-name says `5m` because it came from the five-million-row preparation sample;
-after filtering and splitting, the three prepared splits contained 3,167,935
-interaction rows.
-
-The run created mappings for **238,645 training users** and **137,070 training
-items**. Spark verified that their indices are unique and continuous: users
-run from 0 to 238,644, and items from 0 to 137,069. Here are the interaction
-counts before and after encoding:
-
-| Split | Prepared rows | Encoded rows | Excluded rows |
-|---|---:|---:|---:|
-| Train | 2,687,407 | 2,687,407 | 0 |
-| Validation | 240,034 | 237,857 | 2,177 |
-| Test | 240,494 | 237,067 | 3,427 |
-| **Total** | **3,167,935** | **3,162,331** | **5,604** |
-
-Why are some validation and test rows excluded? The model has an embedding
-row (a learned vector) only for a user and item that appeared in training. If
-a held-out interaction contains a user or item first seen later, the current
-ID-only model has no vector to look up, so the encoding step drops that whole
-interaction row. A row is counted once as excluded even if both IDs are
-unknown. This does not mean those are bad interactions or negative examples;
-it means this model version cannot score them. Later evaluation will measure
-recommendation quality on the encoded held-out rows, so these counts tell us
-that the evaluation covers fewer rows than the prepared validation and test
-splits.
-
-### Mapping questions and answers
-
-**Q: Why does the two-tower model need mappings?**
-
-The source data identifies people and products with text IDs. PyTorch's
-embedding tables work like numbered rows: for example, user index `12` selects
-the thirteenth user vector. The mappings translate each original ID to the
-row number the model can look up. The two tables are `user_id → user_idx` and
-`item_id → item_idx`; the item mapping also lets a later recommendation
-system translate a scored item index back into the original product ID.
-
-**Q: Why not give the model the original text IDs directly?**
-
-The model needs a compact integer address for each embedding row. The text ID
-is a label, not a meaningful numeric measurement: treating it as a number
-would invent an order and distance between users or products. A lookup table
-preserves identity without suggesting that one ID is numerically closer to
-another.
-
-**Q: Why are mappings made from training data only?**
-
-Training data is the history the model is allowed to learn from. Validation
-and test stand in for later events. If their IDs were allowed to create
-embedding rows, the model's vocabulary would learn that future users or items
-exist before it is evaluated. Building mappings from training only keeps the
-evaluation honest and makes unseen-ID coverage visible.
-
-**Q: What happens when a later interaction has an ID missing from the
-mapping?**
-
-The current ID-only model cannot look up a vector for that user or item, so
-the encoding step drops that interaction and counts it. As the results above
-show, 2,177 validation rows and 3,427 test rows were dropped. The model does
-not learn that these users dislike those items; it simply cannot represent
-those rows yet. Supporting them will require a cold-start plan, such as
-feature-based user/item representations or a fallback recommendation.
-
-**Q: Where are the mappings saved, and why keep them?**
-
-They are saved in `data/processed/movies_tv_5m/two_tower/v1/user_mapping`
-and `.../item_mapping`, alongside the encoded splits. Training needs the same
-index assignments used for its interaction rows. Recommendation serving also
-needs the item mapping to turn ranked item indices back into product IDs.
-Rebuilding mappings independently later could assign different row numbers
-and make a saved model point at the wrong users or products.
-
-The mapping outputs are under `data/`, which `.gitignore` excludes. They are
-present on this machine for the next modeling step, but they were not included
-in the GitHub source-code commit.
-
-We then ran the entire suite visibly from WSL with `python -m pytest -v`:
-
-```text
-64 passed in 23.56s
-```
-
-The tests included the Spark mapping checks and synthetic model-training
-checks. Pytest reported two warnings: PySpark's current pandas-version
-compatibility notice and an inability to write its test cache under the
-Windows-mounted project directory. Neither failed a test. To avoid the cache
-warning on later WSL runs, use a Linux temporary folder:
-
-```bash
-python -m pytest -v -o cache_dir=/tmp/endtoendml-pytest-cache
-```
+Spark could not initialize in the Windows Python environment during an earlier
+baseline test because the selected JVM lacked a class required by Spark. Run
+Spark checks from the project's WSL/Java 21 environment when that limitation
+applies. We have not yet run this new mapping command against the dataset.
 
 ### Reading `prepare_tower_data.py` from top to bottom
 
@@ -575,7 +476,7 @@ python -m src.models.prepare_tower_data \
 
 python -m src.models.train_two_tower \
   --data data/processed/movies_tv_5m/two_tower/v1 \
-  --output artifacts/two_tower/movies_tv_5m/v1 \
+  --output artifacts/two_tower/v1 \
   --max-users 2000 \
   --max-train-pairs 100000 \
   --epochs 10 \
@@ -602,51 +503,11 @@ best model. Run it with:
 pytest tests/test_train_two_tower.py -q
 ```
 
-The synthetic test verifies the training mechanics, not recommendation quality
-on Amazon data. We have also completed one bounded run on real interactions;
-its configuration and results are recorded next. Do not use the reported
+The synthetic test does not prove that training improves recommendation
+quality on Amazon data. After the Spark environment is ready, the next useful
+check is a small real-data run and inspection of the sampled user/pair counts,
+validation loss curve, and checkpoint metadata. Do not use the reported
 validation BPR loss as a substitute for Recall@10 or NDCG@10.
-
-### First real-data training run (2026-10-04)
-
-We trained from the mapped `movies_tv_5m` data in WSL and wrote artifacts to
-`artifacts/two_tower/movies_tv_5m/v1`. This was a bounded development run, not
-a full-data or production run. It used seed 42, CPU, 16 numbers per user/item
-vector, batches of 512, 10 epochs, and a limit of at most 2,000 users and
-100,000 training interactions.
-
-The actual sample contained 2,000 users, 21,938 complete training
-interactions, and 2,000 validation interactions, with the full 137,070-item
-catalog. We used fewer than the 100,000 interaction limit because that number
-is a ceiling, not a target: the 2,000 selected users had 21,938 training rows
-in total, and the job keeps their full histories rather than cutting a user's
-history in half. The model therefore learned user vectors only for those
-2,000 selected users. It has vector slots for all 137,070 catalog items,
-though this sample may not have updated every item's vector. This checkpoint
-cannot yet provide a personalized score for every user in the full dataset; a
-later larger training run or a fallback is needed for users outside this
-subset.
-
-The mean training loss fell from 0.693145 in epoch 1 to 0.564963 in epoch 10.
-The sampled validation loss fell from 0.693146 to 0.688978; epoch 10 had the
-lowest validation loss and was saved as the best checkpoint. This is a small
-validation improvement, so the run confirms that training and checkpointing
-work, but does not yet show that the model produces useful recommendations.
-The validation loss compares each held-out item with one sampled alternative;
-it does not measure whether the held-out item appears near the top of a ranked
-catalog list.
-
-The run saved `best_model.pt` (about 8.9 MB) and `history.json` with the full
-loss curve, pair counts, user count, and catalog size. We reloaded the
-checkpoint and verified that its user embedding table is 2,000 by 16, its
-item table is 137,070 by 16, and all weights are finite. The checkpoint also
-stores the selected source user indices and the item-mapping path so later
-scoring can translate between source IDs and the sampled model indices.
-
-The next ML step is to add ranking evaluation such as Recall@K and NDCG@K.
-That will tell us whether known held-out items rank highly among candidate
-items; loss alone cannot answer that. The final test split must remain unused
-until model choices are finished.
 
 ### Run a visible synthetic demo
 
