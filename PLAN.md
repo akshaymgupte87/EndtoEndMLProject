@@ -24,13 +24,17 @@ that are not available locally; it is not a list of features to build.
 
 ## Verified
 
-- The full local test suite last passed **99 tests**. Test commands, per-epoch
+- The full local test suite last passed **100 tests**. Test commands, per-epoch
   observations, ranking metrics, and limitations are in the
   [test report](docs/two_tower_test_report.md).
 - A local Docker Compose end-to-end run passed from batch artifact export
   through API serving, Redis cache/fallback/recovery, Prometheus scraping, and
-  OpenTelemetry trace export. The outage request was slow (~7.94 seconds),
-  the smoke model did not beat popularity, and the serving image is 1.57 GB;
+  OpenTelemetry trace export. After adding 200 ms Redis timeouts, a rebuilt
+  API returned recommendations in 131 ms with Redis down. Five subsequent
+  uncached requests with Redis healthy had wall-clock latency 7.77–21.78 ms
+  (median 9.22 ms); these are sequential local smoke requests, not an SLO or
+  load test. The smoke model did not beat
+  popularity and the serving image is 1.57 GB;
   these limits are recorded in the
   [deployment walkthrough](docs/deployment_walkthrough.md#end-to-end-run-record-2026-10-05).
 - XGBoost ranked 10,000 validation users' sampled 100-item candidate lists;
@@ -39,20 +43,27 @@ that are not available locally; it is not a list of features to build.
   does not establish that the API should serve XGBoost.
 - The batch workflow passed a 500-user, two-epoch smoke run. This checks the
   workflow, not model quality or 17.4M-row scaling.
+- A fresh 500-user bundle contains a SHA-256 model version, pipeline run ID,
+  training/evaluation MLflow run IDs, timestamp, and seed; the live
+  `/model-info` response returned those values.
 - Terraform formatting and validation passed locally. AWS plan/apply has not
   run; no AWS resources have been created.
+- Kafka producer/consumer passed a one-event local Compose check; the JSONL
+  evidence is in `docs/run_evidence/kafka_event_demo_2026-10-05.jsonl`.
+- Airflow started locally, discovered the batch DAG, and reported no import
+  errors. Triggering its training task was blocked by Windows denying WSL
+  access (`Wsl/Service/E_ACCESSDENIED`), so no Airflow training run is claimed.
 
 ## Remaining runtime checks
 
 Run only when the relevant local service or account is available:
 
-1. Apply the manifest to a local Kubernetes cluster and run the Redis outage
-  exercise against the demo.
-2. Run the Airflow DAG and Kafka producer/consumer with their services active.
-3. Review the exact Terraform plan and cost estimate, then deploy to AWS only
+1. Run the Airflow DAG task and apply the Kubernetes manifest to a local
+  cluster, then exercise Redis failure in that deployment.
+2. Review the exact Terraform plan and cost estimate, then deploy to AWS only
   after account access and CIDR are configured; verify CloudWatch logs,
   dashboard, alarms, and teardown.
-4. Measure larger data only when suitable compute and storage are available.
+3. Measure larger data only when suitable compute and storage are available.
 
 Detailed commands and pass criteria are in the
 [deployment walkthrough](docs/deployment_walkthrough.md) and

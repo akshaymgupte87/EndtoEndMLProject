@@ -506,8 +506,9 @@ Record UTC test time, AWS region/account alias, Terraform state identity,
 image tag and digest, model bundle key and SHA-256, MLflow training/evaluation
 run IDs, task public IP, request cases/statuses, CloudWatch log stream,
 dashboard observations, and any failures/recovery. The public task IP may
-change when ECS replaces a task. `/model-info` reports model type/dimensions,
-not model version/checksum; use the saved bundle hash to identify this run.
+change when ECS replaces a task. A batch-produced bundle makes `/model-info`
+report the model SHA-256 version, pipeline run ID, training/evaluation MLflow
+run IDs, training timestamp, and seed along with model type/dimensions.
 ### Traces and API-specific metrics in AWS
 
 The AWS stack has no trace backend. Local OpenTelemetry sends traces only to

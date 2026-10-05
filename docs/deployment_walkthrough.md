@@ -148,11 +148,10 @@ Logs, but does not deploy Prometheus or an OpenTelemetry Collector in AWS.
 
 Use this sequence for one reviewable deployment experiment:
 
-1. **Identify the model.** Record the validation-gated MLflow registered
-   name/version, training and validation run IDs, report path, dataset/cohort,
-   seed, code revision, and serving-bundle checksums. The batch manifest does
-   not yet capture all of this provenance, so keep missing values in the dated
-   experiment record.
+1. **Identify the model.** Record the SHA-256 model version, pipeline run ID,
+   training/evaluation MLflow run IDs, training timestamp, seed, report path,
+   dataset/cohort, code revision, and serving-bundle checksums. The batch
+   manifest and `/model-info` now include the first five lineage fields.
 2. **Start the local stack.** Set `MODEL_DIR` to the bundle's `serving`
    directory, run `docker compose up --build`, wait for `/ready`, and check
    `/model-info` against the expected dimensions. Save `docker compose ps` and
@@ -188,13 +187,21 @@ AWS.
 
 ## Kubernetes learning deployment
 
+The manifest expects the API image to be built locally and the lineage-bearing
+serving bundle at `/models` inside the node. For kind, load the image and mount
+the model bundle directory to the node before applying the manifest. A plain
+`kubectl apply` on a fresh cluster will not work until the hostPath model
+directory exists on that node. Kubernetes has not been run in this session;
+the runtime test still needs to verify readiness, a recommendation, and
+Redis failure behavior.
+
 Build the same image and start a local cluster (kind must be installed):
 
 ```powershell
 docker build -t endtoendmlproject:local .
 kind create cluster
 kind load docker-image endtoendmlproject:local
-docker cp .\artifacts\batch_run\serving kind-control-plane:/models
+docker cp .\artifacts\e2e_lineage_2026-10-05\serving kind-control-plane:/models
 kubectl apply -f deploy/kubernetes/recommender.yaml
 kubectl port-forward service/recommender-api 8000:8000
 ```
@@ -254,20 +261,36 @@ items. Prometheus reported the `api:8000` target `up`, and its counters showed
 successful/unknown-user requests and Redis cache hits. Collector logs showed
 OTLP request spans.
 
-For the cache-outage check, Redis was stopped and a fresh user/limit request
-still returned HTTP 200. `recommendation_cache_errors_total` rose to 2 (read
-and write failures), but that uncached request took about 7.94 seconds. Redis
-was restarted; a fresh key and repeat request succeeded and Redis cache hits
-resumed. This verifies fallback and recovery behavior, while exposing slow
-failure latency that should be fixed before treating the fallback as
-production-ready. The final local Compose stack is left running for inspection
-at `http://localhost:8000` and `http://localhost:9090`; stop it with
-`docker compose down` from WSL in the repository directory.
+For the first cache-outage check, Redis was stopped and a fresh user/limit
+request still returned HTTP 200. `recommendation_cache_errors_total` rose to 2
+(read and write failures), but that uncached request took about 7.94 seconds.
+Redis was restarted; a fresh key and repeat request succeeded and Redis cache
+hits resumed. In a follow-up after configuring 200 ms connect/read
+timeouts and rebuilding the API, an uncached request with Redis stopped
+returned HTTP 200 and seven items in 131 ms. This is one local smoke
+measurement, not an SLO or load test. Five subsequent uncached requests with
+limits 9–13 also returned HTTP 200; wall-clock latencies were 21.78, 8.81,
+10.12, 9.22, and 7.77 ms (median 9.22 ms). Prometheus recorded six
+recommendation requests after restart and no Redis errors in that healthy-cache
+sample. These local results have no concurrency and exclude network/load
+variation. The stack was left running for
+inspection at `http://localhost:8000` and `http://localhost:9090`; stop it
+with `docker compose down` from WSL in the repository directory.
 
-After separating checkpoint loading, the full WSL pytest suite also passed:
-**99 passed, 1 non-failing PySpark/Pandas compatibility warning, 27.17
-seconds**. These synthetic behavior tests complement, but do not replace, the
-real-data batch and serving checks above.
+After separating checkpoint loading, the updated full WSL pytest suite passed:
+**100 passed in 25.72 seconds**, with a non-failing PySpark/Pandas
+compatibility warning and a pytest cache permission warning on the mounted
+Windows workspace. These synthetic behavior tests complement, but do not
+replace, the real-data batch and serving checks above.
+
+The fresh serving bundle's `/model-info` response included model version
+`sha256:a0ab430675c393096fb6f7b35369c218dbc33997cc666c5c46c32d92c97d9e17`,
+pipeline run `06300aa2-5c67-4b3d-85bc-38aa31c6545d`, training MLflow run
+`4bc4c84a194242e1a382d95fdd002eae`, and evaluation MLflow run
+`50a5461dd7444f5980583cce048abe3f`. Seed was 42; the cohort had 500 users and
+137,070 items. This was a repeated 500-user, two-epoch smoke train; recall
+remained zero at K=10 and K=20, while popularity had Recall@10 1.4% and
+Recall@20 1.8%. This validates lineage and serving, not model quality or scale.
 
 ## Airflow and Kafka demos
 
@@ -277,10 +300,21 @@ Airflow is an optional dependency, kept out of the everyday project install:
 uv sync --extra airflow
 ```
 
-Copy `deploy/airflow/dags/recommender_batch.py` into the Airflow DAG folder.
-The scheduler/worker must have this repository, prepared data, Spark/Java,
-and enough memory mounted at the paths in the DAG parameters. Trigger the DAG
-manually; it runs the same `src.pipeline.batch_job` command.
+The optional `airflow` Compose profile starts Airflow 2.10.5 with the DAG
+mounted from `deploy/airflow/dags/recommender_batch.py`. On 2026-10-05, the
+container started, `airflow dags list` found
+`recommender_batch_training`, and `airflow dags list-import-errors` returned
+no errors. The training task could not be triggered in this environment:
+Windows denied WSL access (`Wsl/Service/E_ACCESSDENIED`) while invoking Docker
+Compose. Therefore the orchestration shell command and data/runtime mounts
+still need an actual task run. The DAG uses container defaults under
+`/opt/venv`, `/opt/recommender`, and `/usr/lib/jvm/java-21-openjdk-amd64`.
+Override them through Airflow Variables named `recommender_project_dir`,
+`recommender_data_dir`, `recommender_output_root`, `recommender_python`,
+`recommender_python_dir`, `recommender_spark_home`, `recommender_java_home`,
+and `recommender_spark_driver_memory` when the worker layout differs. The
+base Airflow image still needs a compatible Python/Spark/Java runtime installed
+or mounted; DAG discovery alone does not prove the task runtime is ready.
 
 Start the optional single-node Kafka broker in Compose, then send one event
 and consume a bounded batch:
@@ -292,8 +326,11 @@ python -m src.events.consume_events --max-events 1 --output data/events/demo.jso
 docker compose --profile events stop kafka
 ```
 
-The event file is a future training-data input only. The running recommender
-does not consume Kafka synchronously.
+On 2026-10-05, this producer/consumer check succeeded: one click event
+(`user_idx=12`, `item_idx=31`) was sent and consumed. The exact JSONL record is
+saved in [run evidence](run_evidence/kafka_event_demo_2026-10-05.jsonl). The
+event file is a future training-data input only. The running recommender does
+not consume Kafka synchronously.
 
 ## Tests and current verification
 
@@ -301,7 +338,7 @@ Run all tests in WSL using the full-suite command in the study guide. Focused
 deployment tests cover the API, event schema, and model-registration gate:
 `python -m pytest tests/test_api.py tests/test_event_schema.py tests/test_model_registration.py -q`.
 The [test report](two_tower_test_report.md#complete-pytest-inventory-and-pass-criteria)
-lists every one of the 99 collected pytest cases and its pass condition. It
+lists every one of the 100 collected pytest cases and its pass condition. It
 also gives separate pass criteria for configuration checks, batch smoke,
 offline evaluation, and external-runtime exercises; those are not included in
 the pytest count.
@@ -309,9 +346,9 @@ Terraform syntax was formatted and `terraform validate` passed after provider
 initialization. `docker compose config --quiet` passed. The batch smoke job
 ran end-to-end on 500 users, exported a model bundle, and wrote validation
 metrics; its two-epoch model scored zero hits, which is expected to be treated
-only as a plumbing check. AWS deployment, a running Kubernetes cluster,
-Airflow scheduler, and Kafka broker require their external runtimes and have
-not been applied/launched by these local checks.
+only as a plumbing check. Kafka's one-event producer/consumer path and Airflow
+DAG discovery were checked as recorded above; the Airflow training task,
+Kubernetes deployment, and AWS deployment remain unverified.
 
 ### Batch smoke run log
 

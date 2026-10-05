@@ -8,7 +8,9 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -20,8 +22,14 @@ def _run(command: list[str], env: dict[str, str] | None = None) -> None:
     subprocess.run(command, check=True, env=env)
 
 
-def export_serving_artifacts(data: Path, output: Path, checkpoint: Path) -> Path:
+def export_serving_artifacts(
+    data: Path,
+    output: Path,
+    checkpoint: Path,
+    lineage: dict[str, object] | None = None,
+) -> Path:
     model, metadata = load_two_tower_checkpoint(checkpoint, device="cpu")
+    lineage = lineage or {}
     output.mkdir(parents=True, exist_ok=True)
     item_mapping_path = data / "item_mapping"
     from pyspark.sql import SparkSession
@@ -74,6 +82,7 @@ def export_serving_artifacts(data: Path, output: Path, checkpoint: Path) -> Path
                 "embedding_dim": model.embedding_dim,
                 "model_user_ids": user_ids,
                 "checkpoint": checkpoint.name,
+                **lineage,
             },
             indent=2,
         ),
@@ -83,6 +92,7 @@ def export_serving_artifacts(data: Path, output: Path, checkpoint: Path) -> Path
         "model_type": "two_tower_id_embeddings",
         "num_users": model.num_users,
         "num_items": model.num_items,
+        **lineage,
         "files": {},
     }
     for name in ("best_model.pt", "item_vectors.npy", "item_ids.json", "user_ids.json", "seen_items.json", "model_metadata.json"):
@@ -117,6 +127,8 @@ def main() -> None:
     if not args.data.is_dir():
         parser.error("--data must point to an existing encoded dataset")
     args.output.mkdir(parents=True, exist_ok=True)
+    pipeline_run_id = str(uuid.uuid4())
+    trained_at_utc = datetime.now(timezone.utc).isoformat()
     run_env = os.environ.copy()
     train_cmd = [
         sys.executable, "-m", "src.models.train_two_tower",
@@ -136,10 +148,35 @@ def main() -> None:
     if args.candidate_items:
         evaluate_cmd.extend(["--candidate-items", str(args.candidate_items)])
     _run(evaluate_cmd, env=run_env)
-    bundle = export_serving_artifacts(args.data, args.output / "serving", args.output / "best_model.pt")
+    evaluation_run = json.loads(
+        (args.output / "evaluation_mlflow_run.json").read_text(encoding="utf-8")
+    )
+    training_run_path = args.output / "training_mlflow_run.json"
+    training_run = (
+        json.loads(training_run_path.read_text(encoding="utf-8"))
+        if training_run_path.is_file()
+        else {"run_id": None}
+    )
+    model_version = "sha256:" + hashlib.sha256(
+        (args.output / "best_model.pt").read_bytes()
+    ).hexdigest()
+    lineage = {
+        "model_version": model_version,
+        "pipeline_run_id": pipeline_run_id,
+        "training_mlflow_run_id": training_run["run_id"],
+        "evaluation_mlflow_run_id": evaluation_run["run_id"],
+        "trained_at_utc": trained_at_utc,
+        "seed": args.seed,
+    }
+    bundle = export_serving_artifacts(
+        args.data,
+        args.output / "serving",
+        args.output / "best_model.pt",
+        lineage=lineage,
+    )
     report = json.loads((args.output / "validation_metrics.json").read_text(encoding="utf-8"))
     manifest = {
-        "run_seed": args.seed,
+        **lineage,
         "input_data": str(args.data),
         "users": report["users_evaluated"],
         "validation_metrics": report["metrics_at_k"],

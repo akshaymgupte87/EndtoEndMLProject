@@ -22,6 +22,9 @@ spec:
           env:
             - name: MODEL_DIR
               value: /models
+          # Set this to a local tag for kind/minikube; the mounted model must
+          # be the serving directory exported by src.pipeline.batch_job.
+          # Optionally set REDIS_URL only when a Redis Service is deployed.
           volumeMounts:
             - name: model-artifacts
               mountPath: /models

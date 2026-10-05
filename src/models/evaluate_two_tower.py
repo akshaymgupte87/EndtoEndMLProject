@@ -490,6 +490,18 @@ def main() -> None:
         tags={"stage": f"{args.split}_evaluation", "model": "two_tower"},
         tracking_uri=args.mlflow_tracking_uri,
     )
+    (args.output.parent / "evaluation_mlflow_run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "experiment_name": args.mlflow_experiment,
+                "tracking_uri": args.mlflow_tracking_uri,
+                "split": args.split,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     print(f"MLflow run: {run_id}")
 
 

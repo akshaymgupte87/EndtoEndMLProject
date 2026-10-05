@@ -3,6 +3,8 @@
 import json
 import hashlib
 import asyncio
+import sys
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -57,7 +59,20 @@ def model_bundle(tmp_path):
     (directory / "item_ids.json").write_text(json.dumps(["item-a", "item-b", "item-c"]))
     (directory / "user_ids.json").write_text(json.dumps([77, 88]))
     (directory / "seen_items.json").write_text(json.dumps({"0": [0], "1": [2]}))
-    files = ("best_model.pt", "item_vectors.npy", "item_ids.json", "user_ids.json", "seen_items.json")
+    (directory / "model_metadata.json").write_text(
+        json.dumps(
+            {
+                "model_type": "two_tower_id_embeddings",
+                "model_version": "sha256:abc123",
+                "pipeline_run_id": "pipeline-123",
+                "training_mlflow_run_id": "train-456",
+                "evaluation_mlflow_run_id": "eval-789",
+                "trained_at_utc": "2026-10-05T12:00:00+00:00",
+                "seed": 42,
+            }
+        )
+    )
+    files = ("best_model.pt", "item_vectors.npy", "item_ids.json", "user_ids.json", "seen_items.json", "model_metadata.json")
     manifest = {"files": {name: hashlib.sha256((directory / name).read_bytes()).hexdigest() for name in files}}
     (directory / "manifest.json").write_text(json.dumps(manifest))
     return directory
@@ -70,6 +85,15 @@ def test_api_serves_known_user_hides_seen_and_rejects_unknown(model_bundle) -> N
             status, body = await _request(app, "/health")
             assert status == 200 and json.loads(body) == {"status": "ok"}
             assert (await _request(app, "/ready"))[0] == 200
+            status, body = await _request(app, "/model-info")
+            assert status == 200
+            info = json.loads(body)
+            assert info["model_version"] == "sha256:abc123"
+            assert info["pipeline_run_id"] == "pipeline-123"
+            assert info["training_mlflow_run_id"] == "train-456"
+            assert info["evaluation_mlflow_run_id"] == "eval-789"
+            assert info["seed"] == 42
+            assert info["users"] == 2 and info["items"] == 3
             status, body = await _request(app, "/recommendations/77?limit=2")
             assert status == 200
             assert json.loads(body)["items"] == ["item-b", "item-c"]
@@ -103,3 +127,28 @@ def test_api_falls_back_when_redis_is_down(model_bundle) -> None:
             assert status == 200 and b"recommendation_cache_errors_total" in body
 
     asyncio.run(run())
+
+
+def test_api_configures_short_redis_connect_and_read_timeouts(
+    model_bundle, monkeypatch
+) -> None:
+    options = {}
+
+    class FakeRedisClient:
+        @staticmethod
+        def from_url(url, **kwargs):
+            options.update(kwargs)
+            return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=FakeRedisClient))
+    monkeypatch.setenv("REDIS_URL", "redis://cache.invalid:6379/0")
+    app = create_app(model_bundle)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            assert app.state.runtime["redis"] is not None
+
+    asyncio.run(run())
+    assert options["socket_connect_timeout"] == 0.2
+    assert options["socket_timeout"] == 0.2
+    assert options["retry_on_timeout"] is False

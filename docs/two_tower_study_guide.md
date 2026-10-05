@@ -106,20 +106,20 @@ implemented feature.
 | Experiment tracking | **Implemented locally.** MLflow records parameters, metrics, epoch history, and artifacts in a local SQLite-backed tracking store. SageMaker managed MLflow is a later AWS option; Bedrock is not the tracker for this PyTorch recommender. | [Tracking helper](../src/models/experiment_tracking.py), [tracking test](../tests/test_experiment_tracking.py), [AWS tracking decision](deployment_walkthrough.md#where-experiment-tracking-should-live) |
 | Model artifacts | **Implemented locally and S3-readable.** Two-tower checkpoints include weights and ID metadata; the batch job adds item vectors, ID maps, seen history, checksums, and a ZIP. API startup can download the ZIP from S3. Current files are local ignored artifacts unless uploaded. | [Checkpoint save/load](../src/models/train_two_tower.py), [batch export](../src/pipeline/batch_job.py), [API artifact loader](../src/api/app.py) |
 | Model registration | **Implemented locally behind the validation gate.** The current checkpoint is MLflow registry version 2 under alias `candidate`. There is no automated production promotion. | [Registration command](../src/models/register_model.py), [gate tests](../tests/test_model_registration.py), MLflow run `05edeb1157c248ddb288bef43b08ef17` |
-| API serving | **Implemented with request tests; container deployment not run.** FastAPI loads model artifacts and serves top-N items by mapped user index. | [API](../src/api/app.py), [API tests](../tests/test_api.py) |
+| API serving | **Implemented and exercised through Docker Compose.** FastAPI loads a batch bundle and serves top-N items by mapped user index; `/model-info` includes model and run lineage. | [API](../src/api/app.py), [API tests](../tests/test_api.py), [run record](deployment_walkthrough.md#end-to-end-run-record-2026-10-05) |
 | Caching | **Implemented as optional Redis plus process-memory cache.** If Redis is unavailable, the API counts the error and still scores recommendations. | [API cache behavior](../src/api/app.py), [fallback test](../tests/test_api.py), [chaos script](../deploy/chaos/cache_outage.ps1) |
-| Metrics / Prometheus | **Implemented locally in code/config; scrape stack not run.** API exposes request counts, latency, errors, cache hits, and `/metrics`. | [API metrics](../src/api/app.py), [Prometheus scrape config](../deploy/prometheus/prometheus.yml) |
-| OpenTelemetry | **Instrumentation/config written; collector not run.** FastAPI requests can be exported through OTLP HTTP to the local Collector. | [API tracing setup](../src/api/app.py), [Collector config](../deploy/otel/collector.yml) |
-| Orchestration | **One Airflow DAG written; scheduler not run.** It triggers the same batch job manually, without complex scheduling logic. | [Airflow DAG](../deploy/airflow/dags/recommender_batch.py) |
-| Streaming-event concepts | **Producer/consumer/schema code written; broker flow not run.** Events are validated and consumed into JSON Lines for future offline training. | [Event schema](../src/events/schema.py), [producer](../src/events/produce_event.py), [consumer](../src/events/consume_events.py), [tests](../tests/test_event_schema.py) |
+| Metrics / Prometheus | **Implemented and scraped in the Compose run.** API exposes request counts, latency, errors, cache hits, and `/metrics`; Prometheus reported the API target UP. | [API metrics](../src/api/app.py), [Prometheus scrape config](../deploy/prometheus/prometheus.yml), [run record](deployment_walkthrough.md#end-to-end-run-record-2026-10-05) |
+| OpenTelemetry | **Request tracing exported to the local Collector.** FastAPI request spans appeared in Collector logs during the Compose run. | [API tracing setup](../src/api/app.py), [Collector config](../deploy/otel/collector.yml), [run record](deployment_walkthrough.md#end-to-end-run-record-2026-10-05) |
+| Orchestration | **Airflow container and DAG discovery verified; training task not run.** DAG imports cleanly, but Windows denied WSL access during the task trigger. | [Airflow DAG](../deploy/airflow/dags/recommender_batch.py), [deployment record](deployment_walkthrough.md#airflow-and-kafka-demos) |
+| Streaming-event concepts | **One Kafka producer/consumer flow verified.** A click event was validated and consumed into retained JSON Lines for future offline training. | [Event schema](../src/events/schema.py), [producer](../src/events/produce_event.py), [consumer](../src/events/consume_events.py), [evidence](run_evidence/kafka_event_demo_2026-10-05.jsonl) |
 | Containerization / Kubernetes | **Docker/Compose verified locally; Kubernetes manifest not run.** The batch-exported bundle served through Compose; API health, requests, Redis cache/fallback/recovery, Prometheus scrape, and OpenTelemetry traces passed. The API image is about 1.57 GB. A local Kubernetes cluster has not been launched. | [End-to-end run](deployment_walkthrough.md#end-to-end-run-record-2026-10-05), [Dockerfile](../Dockerfile), [Compose](../compose.yaml), [Kubernetes manifest](../deploy/kubernetes/recommender.yaml) |
 | AWS / Terraform | **Terraform validates; AWS not applied.** ECS Fargate task, ECR, S3 model bucket, IAM, existing default-VPC networking, and CloudWatch are configured. | [Terraform](../deploy/aws/main.tf), [AWS runbook](aws_deployment_runbook.md) |
 
 The code path now reaches a batch-exported model bundle and a locally tested
-recommendation API. Compose observability, Kubernetes, Terraform, Airflow, and
-Kafka files are present; their external runtimes still need to be launched
-and verified. See the [deployment walkthrough](deployment_walkthrough.md) and
-the verification statuses in [PLAN.md](../PLAN.md).
+recommendation API. Compose observability and Kafka were exercised; Airflow's
+training task, Kubernetes, and AWS still need runtime verification. See the
+[deployment walkthrough](deployment_walkthrough.md) and the verification
+statuses in [PLAN.md](../PLAN.md).
 
 ## Setup and first run
 
@@ -419,7 +419,7 @@ the model on the full Amazon dataset.
 | `tests/test_train_two_tower.py` | Training loop, validation-loss checkpoint selection, checkpoint round-trip, and input validation. |
 | `tests/test_xgboost_ranker.py` | Deterministic candidates, history exclusion, training-only Pandas features, and a small grouped XGBoost fit/predict check. |
 
-The complete inventory of all 99 collected cases, including the expanded
+The complete inventory of all 100 collected cases, including the expanded
 parameterized inputs and a concrete pass condition for each case, is in the
 [test results report](two_tower_test_report.md#complete-pytest-inventory-and-pass-criteria).
 It also distinguishes the pytest suite from offline evaluation, batch smoke,
@@ -441,7 +441,7 @@ wsl.exe -d Ubuntu --cd /mnt/c/Users/aksha/PycharmProjects/EndtoEndMLProject --ex
 
 For visible per-test progress, replace `-q` with `-v`. To see a short summary
 at the end without one line per test, omit `-q` and `-v`. A successful run
-ends with a summary such as `99 passed`; the count can grow as tests are
+ends with a summary such as `100 passed`; the count can grow as tests are
 added. The latest verified count and warnings are recorded in [the test
 report](two_tower_test_report.md). Warnings are listed separately and do not
 mean a test failed unless pytest reports a nonzero exit status.
@@ -1261,8 +1261,9 @@ and evaluation by default.
 
 The test `tests/test_experiment_tracking.py` uses a temporary SQLite database
 to verify parameters, final metrics, epoch-step metrics, and artifact upload.
-The latest complete WSL suite passes **99 tests** (24.57 seconds; one
-non-failing PySpark/Pandas compatibility warning). MLflow records are local
+The latest complete WSL suite passes **100 tests** (25.72 seconds; one
+non-failing PySpark/Pandas compatibility warning and one mounted-filesystem
+pytest cache warning). MLflow records are local
 experiment evidence; this step does not register or deploy a production model.
 
 ## Step 7: compare implicit ALS with popularity

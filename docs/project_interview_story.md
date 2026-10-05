@@ -78,9 +78,13 @@ ranking gain. Implicit ALS averaged below popularity. The sampled XGBoost
 candidate experiment scored higher on its own sampled 100-item lists, but
 those values are not comparable to full-catalog ranking and XGBoost is not
 served by the API. The current Docker Compose demo passed health, known/unknown
-user, metrics, trace, cache, and fallback checks. The Redis outage request
-still succeeded but took about 7.94 seconds. No online conversion, retention,
-latency-at-load, AWS, or production-scale result has been measured.
+user, metrics, trace, cache, and fallback checks. After a 200 ms connect/read
+timeout fix, one rebuilt-container Redis outage request returned in 131 ms.
+Five subsequent sequential requests with Redis healthy took 7.77–21.78 ms
+(median 9.22 ms) with no concurrency. These are smoke measurements, not a
+latency-at-load result. No
+online conversion, retention, latency-at-load, AWS, or production-scale result
+has been measured.
 
 ## Architecture and the reasons behind it
 
@@ -111,7 +115,7 @@ flowchart LR
 | Bound the batch run and export a portable serving bundle. | Makes the Spark-to-model-to-API path testable on a laptop and avoids retraining during requests. | The 500-user smoke model checks wiring only; it is not a large-scale training benchmark or strong model. |
 | Separate batch training from API serving. | Training is offline and may use Spark/MLflow; serving only loads a checkpoint and item vectors. The API image therefore omits Spark/MLflow and uses CPU-only PyTorch. | The current API serves only two-tower checkpoints; training, ranking experiments, and MLflow tracking remain separate commands/services. |
 | Precompute item vectors and use exact dot-product ranking. | Simple to understand and sufficient for this dataset-sized demo. | Scoring all 137,070 items for a request is not an efficient retrieval index for a much larger catalog. There is no ANN index. |
-| Make Redis optional and retain local scoring fallback. | Cache can reduce repeated computation without making Redis the sole source of recommendations. | The observed Redis outage fallback took about 7.94 seconds; current timeout/retry behavior needs work. |
+| Make Redis optional and retain local scoring fallback. | Cache can reduce repeated computation without making Redis the sole source of recommendations. | With 200 ms connect/read timeouts, one rebuilt-container outage request returned in 131 ms; five healthy-cache requests had a 9.22 ms median. These are smoke results, not an SLO. |
 | Add Prometheus and OpenTelemetry locally. | Makes request count, latency, cache behavior, and HTTP spans visible during the demo. | These signals are not yet wired to a durable hosted observability service in AWS. |
 | Keep AWS Terraform small and explicit. | ECS/Fargate, ECR, S3, IAM, CloudWatch, and an existing default VPC demonstrate a credible deployment path without extra DNS, load-balancer, certificate, or secret infrastructure. | AWS plan/apply has not been run. The demo uses public HTTP and is not hardened for sensitive traffic. |
 
@@ -162,8 +166,9 @@ this project already has.
   all-item scoring, in-memory histories, and local artifact collection need
   redesign or measurement for large traffic/catalogs.
 - **Operations are a demo.** Compose was tested locally, but Kubernetes,
-  Airflow, Kafka, and AWS have not been run end to end. The Redis outage
-  response was slow, the API image is still about 1.57 GB, and no load/SLO or
+  Kafka's one-event producer/consumer check passed; Airflow's DAG loaded but
+  its task could not run because Windows denied WSL access. AWS has not been
+  deployed. The API image measured about 1.57 GB, and no load/SLO or
   security-hardening assessment has been completed.
 - **Feedback and ranking are incomplete.** Streaming events are examples and
   do not update the live model. XGBoost is an offline experiment; the API does
@@ -180,19 +185,13 @@ They should not add infrastructure just to make the project look larger.
 
 ### 1. Improve serving reliability
 
-The latest Redis outage exercise preserved recommendation responses, but one
-uncached request took about **7.94 seconds**. First measure request latency
-with Redis healthy, unavailable, and recovering. Use Prometheus histograms and
-the recorded request outcomes; compare cached and uncached requests.
-
-Then configure Redis connection timeouts and retries to fail quickly while
-keeping model-scoring fallback enabled. Add a focused API test with a simulated
-Redis failure that verifies the response is still successful and that the
-fallback completes within a chosen local latency bound. The bound should be
-set after measuring normal local scoring latency, with a reasonable margin;
-it is a project acceptance target, not a production SLO. Rebuild the CPU-only
-Docker image and repeat the Compose checks for readiness, cached requests,
-Redis outage, cache-error metrics, and recovery.
+The earlier Redis outage took about **7.94 seconds**. Redis now has 200 ms
+connect/read timeouts, and the API has a focused simulated-failure test. After
+rebuilding the image, one uncached request with Redis stopped returned HTTP
+200 and seven items in **131 ms**. This one-request smoke result does not
+establish a latency SLO. The next check is a repeatable small latency sample
+with Redis healthy, unavailable, and recovering, using the Prometheus
+histogram and request outcomes to compare cached and uncached behavior.
 
 ### 2. Strengthen recommendation evaluation
 

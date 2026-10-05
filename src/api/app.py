@@ -60,6 +60,12 @@ def load_runtime(model_dir: Path) -> dict:
             raise ValueError(f"serving artifact checksum mismatch: {filename}")
     model, metadata = load_two_tower_checkpoint(model_dir / "best_model.pt", device="cpu")
     model.eval()
+    metadata_path = model_dir / "model_metadata.json"
+    serving_metadata = (
+        json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata_path.is_file()
+        else {}
+    )
     item_ids = json.loads((model_dir / "item_ids.json").read_text(encoding="utf-8"))
     user_ids = json.loads((model_dir / "user_ids.json").read_text(encoding="utf-8"))
     seen = json.loads((model_dir / "seen_items.json").read_text(encoding="utf-8"))
@@ -71,6 +77,7 @@ def load_runtime(model_dir: Path) -> dict:
     return {
         "model": model,
         "metadata": metadata,
+        "serving_metadata": serving_metadata,
         "item_ids": item_ids,
         "user_to_local": {int(source): local for local, source in enumerate(user_ids)},
         "seen": {int(local): set(items) for local, items in seen.items()},
@@ -89,7 +96,12 @@ def create_app(model_dir: Path | None = None) -> FastAPI:
         if redis_url:
             import redis
 
-            application.state.runtime["redis"] = redis.Redis.from_url(redis_url, socket_timeout=0.2)
+            application.state.runtime["redis"] = redis.Redis.from_url(
+                redis_url,
+                socket_timeout=0.2,
+                socket_connect_timeout=0.2,
+                retry_on_timeout=False,
+            )
         try:
             yield
         finally:
@@ -116,6 +128,12 @@ def create_app(model_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=503, detail="model is not loaded")
         return {
             "model_type": runtime["metadata"].get("model_type", "two_tower_id_embeddings"),
+            "model_version": runtime["serving_metadata"].get("model_version"),
+            "pipeline_run_id": runtime["serving_metadata"].get("pipeline_run_id"),
+            "training_mlflow_run_id": runtime["serving_metadata"].get("training_mlflow_run_id"),
+            "evaluation_mlflow_run_id": runtime["serving_metadata"].get("evaluation_mlflow_run_id"),
+            "trained_at_utc": runtime["serving_metadata"].get("trained_at_utc"),
+            "seed": runtime["serving_metadata"].get("seed"),
             "users": len(runtime["user_to_local"]),
             "items": len(runtime["item_ids"]),
             "embedding_dim": runtime["model"].embedding_dim,

@@ -462,6 +462,17 @@ def main() -> None:
             tags={"stage": "training", "model": "two_tower"},
             tracking_uri=args.mlflow_tracking_uri,
         )
+        (args.output / "training_mlflow_run.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "experiment_name": args.mlflow_experiment,
+                    "tracking_uri": args.mlflow_tracking_uri,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         print(f"MLflow run: {run_id}")
     finally:
         spark.stop()

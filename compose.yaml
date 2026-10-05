@@ -53,3 +53,18 @@ services:
       KAFKA_NUM_PARTITIONS: 1
     ports:
       - "9092:9092"
+
+  airflow:
+    image: apache/airflow:2.10.5-python3.11
+    profiles: ["airflow"]
+    command: ["standalone"]
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+    volumes:
+      - ./deploy/airflow/dags:/opt/airflow/dags:ro
+      - ./:/opt/recommender
+      - /home/akshay/miniconda3:/home/akshay/miniconda3:ro
+      - /usr/lib/jvm/java-21-openjdk-amd64:/usr/lib/jvm/java-21-openjdk-amd64:ro
+    ports:
+      - "8080:8080"
