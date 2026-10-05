@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
-from src.models.train_two_tower import load_two_tower_checkpoint
+from src.models.two_tower import load_two_tower_checkpoint
 
 
 REQUESTS = Counter("recommendation_requests_total", "Recommendation API requests", ["status"])

@@ -18,7 +18,12 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from src.models.sampling import UniformNegativeSampler, build_seen_items
 from src.models.experiment_tracking import log_experiment_run
-from src.models.two_tower import PairwiseTrainingDataset, TwoTowerRecommender, bpr_loss
+from src.models.two_tower import (
+    PairwiseTrainingDataset,
+    TwoTowerRecommender,
+    bpr_loss,
+    load_two_tower_checkpoint,
+)
 
 
 @dataclass(frozen=True)
@@ -131,21 +136,6 @@ def _save_checkpoint(
         temporary_path.replace(path)
     finally:
         temporary_path.unlink(missing_ok=True)
-
-
-def load_two_tower_checkpoint(
-    path: Path, device: str | torch.device = "cpu"
-) -> tuple[TwoTowerRecommender, dict[str, Any]]:
-    """Load the best model checkpoint and its small JSON-compatible metadata."""
-    payload = torch.load(path, map_location=device, weights_only=True)
-    if payload.get("format_version") != 1:
-        raise ValueError(f"Unsupported checkpoint format: {payload.get('format_version')}")
-    model_config = payload["model_config"]
-    model = TwoTowerRecommender(**model_config).to(device)
-    model.load_state_dict(payload["state_dict"], strict=True)
-    model.eval()
-    metadata = {key: value for key, value in payload.items() if key != "state_dict"}
-    return model, metadata
 
 
 def train_two_tower(

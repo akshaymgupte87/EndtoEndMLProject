@@ -5,9 +5,10 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir \
-    fastapi uvicorn numpy torch pyspark mlflow prometheus-client redis boto3 \
+    fastapi uvicorn numpy prometheus-client redis boto3 \
     opentelemetry-api opentelemetry-sdk \
     opentelemetry-exporter-otlp-proto-http \
-    opentelemetry-instrumentation-fastapi
+    opentelemetry-instrumentation-fastapi \
+    && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=2.6,<3"
 EXPOSE 8000
 CMD ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

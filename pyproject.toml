@@ -16,6 +16,7 @@ dependencies = [
     "torch>=2.6,<3",
     "uvicorn[standard]>=0.34,<1",
     "boto3>=1.35,<2",
+    "xgboost>=3.0,<4",
     "opentelemetry-api>=1.28,<2",
     "opentelemetry-sdk>=1.28,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.28,<2",
@@ -44,6 +45,7 @@ run-recommender-batch = "src.pipeline.batch_job:main"
 recommender-event-produce = "src.events.produce_event:main"
 recommender-event-consume = "src.events.consume_events:main"
 register-two-tower-model = "src.models.register_model:main"
+evaluate-xgboost-ranker = "src.models.xgboost_ranker:main"
 
 [build-system]
 requires = ["setuptools>=77"]

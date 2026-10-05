@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from numbers import Integral
+from pathlib import Path
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -114,6 +116,21 @@ class TwoTowerRecommender(nn.Module):
         positive_scores = self.score(user_indices, positive_item_indices)
         negative_scores = self.score(user_indices, negative_item_indices)
         return positive_scores, negative_scores
+
+
+def load_two_tower_checkpoint(
+    path: Path, device: str | torch.device = "cpu"
+) -> tuple[TwoTowerRecommender, dict[str, Any]]:
+    """Load a model checkpoint without importing the Spark training runtime."""
+    payload = torch.load(path, map_location=device, weights_only=True)
+    if payload.get("format_version") != 1:
+        raise ValueError(f"Unsupported checkpoint format: {payload.get('format_version')}")
+    model_config = payload["model_config"]
+    model = TwoTowerRecommender(**model_config).to(device)
+    model.load_state_dict(payload["state_dict"], strict=True)
+    model.eval()
+    metadata = {key: value for key, value in payload.items() if key != "state_dict"}
+    return model, metadata
 
 
 def bpr_loss(positive_scores: Tensor, negative_scores: Tensor) -> Tensor:

@@ -10,7 +10,9 @@ that are not available locally; it is not a list of features to build.
   validation/test splits, and training-only user/item mappings.
 - Popularity and Spark implicit ALS baselines; PyTorch two-tower training,
   evaluation, cohort comparison, experiment tracking, and gated local model
-  registration.
+  registration. Pandas builds bounded candidate tables with training-only
+  history affinity; an XGBoost ranker compares with two-tower scoring on
+  sampled validation candidates.
 - A bounded batch command that trains, evaluates, and exports a serving bundle.
 - FastAPI recommendations with health/readiness/model-info/metrics endpoints,
   optional Redis caching and fallback, and S3 bundle loading.
@@ -22,9 +24,19 @@ that are not available locally; it is not a list of features to build.
 
 ## Verified
 
-- The full local test suite last passed **92 tests**. Test commands, per-epoch
+- The full local test suite last passed **99 tests**. Test commands, per-epoch
   observations, ranking metrics, and limitations are in the
   [test report](docs/two_tower_test_report.md).
+- A local Docker Compose end-to-end run passed from batch artifact export
+  through API serving, Redis cache/fallback/recovery, Prometheus scraping, and
+  OpenTelemetry trace export. The outage request was slow (~7.94 seconds),
+  the smoke model did not beat popularity, and the serving image is 1.57 GB;
+  these limits are recorded in the
+  [deployment walkthrough](docs/deployment_walkthrough.md#end-to-end-run-record-2026-10-05).
+- XGBoost ranked 10,000 validation users' sampled 100-item candidate lists;
+  Recall@10 was 52.59% versus 42.25% for the two-tower on those same lists.
+  This sampled-candidate result is separate from full-catalog metrics and
+  does not establish that the API should serve XGBoost.
 - The batch workflow passed a 500-user, two-epoch smoke run. This checks the
   workflow, not model quality or 17.4M-row scaling.
 - Terraform formatting and validation passed locally. AWS plan/apply has not
@@ -34,14 +46,13 @@ that are not available locally; it is not a list of features to build.
 
 Run only when the relevant local service or account is available:
 
-1. Build and run the Docker/Compose stack; verify API requests and telemetry.
-2. Apply the manifest to a local Kubernetes cluster and run the Redis outage
-   exercise against the demo.
-3. Run the Airflow DAG and Kafka producer/consumer with their services active.
-4. Review the exact Terraform plan and cost estimate, then deploy to AWS only
-   after account access and CIDR are configured; verify CloudWatch logs,
-   dashboard, alarms, and teardown.
-5. Measure larger data only when suitable compute and storage are available.
+1. Apply the manifest to a local Kubernetes cluster and run the Redis outage
+  exercise against the demo.
+2. Run the Airflow DAG and Kafka producer/consumer with their services active.
+3. Review the exact Terraform plan and cost estimate, then deploy to AWS only
+  after account access and CIDR are configured; verify CloudWatch logs,
+  dashboard, alarms, and teardown.
+4. Measure larger data only when suitable compute and storage are available.
 
 Detailed commands and pass criteria are in the
 [deployment walkthrough](docs/deployment_walkthrough.md) and
@@ -49,3 +60,7 @@ Detailed commands and pass criteria are in the
 chaos engineering, Prometheus, and OpenTelemetry as small learning examples;
 it does not add autoscaling, a microservice fleet, or automated production
 promotion.
+
+The evidence-based improvement sequence—serving reliability, stronger
+validation, then one measured AWS deployment or scale run—is explained in the
+[interview story and improvement plan](docs/project_interview_story.md#practical-improvement-plan).

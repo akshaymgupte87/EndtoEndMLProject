@@ -1,8 +1,8 @@
 # Amazon Reviews Recommender
 
-A learning-sized end-to-end recommender built with PySpark, implicit ALS, a
-PyTorch two-tower model, MLflow, a FastAPI recommendation service, and a small
-AWS deployment path.
+A learning-sized end-to-end recommender built with PySpark, implicit ALS,
+PyTorch two-tower retrieval, an XGBoost ranking experiment, Pandas candidate
+features, MLflow, a FastAPI service, and a small AWS deployment path.
 
 ## Start here
 
@@ -16,7 +16,9 @@ AWS deployment path.
    local observability, events, and Kubernetes.
 5. [AWS runbook](docs/aws_deployment_runbook.md): Docker/ECR, ECS/Fargate,
    CloudWatch, optional SageMaker MLflow experiment, and cleanup.
-6. [Project status](PLAN.md): implemented features and remaining verification.
+6. [Interview story and architecture](docs/project_interview_story.md): concise
+   STAR story, system decisions, real-world fit, and limitations.
+7. [Project status](PLAN.md): implemented features and remaining verification.
 
 ## Quick checks
 
@@ -30,10 +32,15 @@ uv run pytest
 Install the optional Airflow package only when running its DAG:
 `uv sync --extra airflow --dev`.
 
-The full local test suite last passed 92 tests. Docker, Kubernetes, Airflow,
-Kafka, AWS, and the 17.4M-row workload have not been verified end to end; see
+The full local test suite last passed 99 tests. Docker Compose was exercised
+end to end locally with batch-exported artifacts, API requests, Redis outage
+and recovery, Prometheus, and OpenTelemetry. Kubernetes, Airflow, Kafka, AWS,
+and the 17.4M-row workload have not been verified end to end; see
 [PLAN.md](PLAN.md) for the remaining checks. Model results and their limits are
 recorded in the [test report](docs/two_tower_test_report.md).
+
+XGBoost is currently an offline learning-to-rank experiment evaluated on
+sampled validation candidates; it is not loaded by the API.
 
 The AWS demo uses ECS/Fargate, ECR, S3, IAM, and CloudWatch, reuses the default
 VPC, and serves non-sensitive demo data over HTTP. It does not use Lambda,

@@ -2,6 +2,21 @@
 
 These notes explain the decisions and PySpark concepts used in the recommender notebook.
 
+## Reading order
+
+- Start with [README.md](../README.md) for the current project state.
+- Use this file for Spark concepts, data preparation, time splits, and WSL
+  troubleshooting.
+- Continue with the [two-tower study guide](two_tower_study_guide.md) for
+  model setup, run order, method flow, and test commands.
+- Use the [test and training report](two_tower_test_report.md) for current
+  test outcomes, epoch traces, and validation findings.
+- Use [PLAN.md](../PLAN.md) to see what remains.
+
+The data and model artifacts are generated locally and are ignored by Git. A
+fresh checkout must download the review data and recreate the prepared splits,
+ID mappings, checkpoints, and MLflow database before those commands can run.
+
 ## Understanding the quality aggregation
 
 ```python
@@ -295,8 +310,15 @@ This is production-shaped because it separates raw data, offline batch
 processing, model artifacts, and online serving. A real petabyte-scale system
 uses object storage, partitioned Parquet or Delta tables, distributed Spark
 executors, incremental processing, precomputed embeddings, and an ANN index.
-The local project emulates those boundaries with `Spark local[*]`, Parquet,
-MLflow, Docker Compose, Redis, and FastAPI.
+The project currently uses `Spark local[*]`, Parquet, a two-tower model, and
+local MLflow. FastAPI, optional Redis caching, Docker Compose, Prometheus,
+OpenTelemetry, Kubernetes manifests, Terraform for ECS/Fargate, an Airflow
+DAG, Kafka event scripts, and a cache-outage exercise are implemented as
+teaching code/configuration. Their unit tests or syntax checks cover only the
+pieces described in [the deployment walkthrough](deployment_walkthrough.md).
+Docker Compose was run end to end locally; Kubernetes, Airflow, Kafka, and AWS
+have not. See [PLAN.md](../PLAN.md) for the verification status of each
+component.
 
 ## Temporal train/validation/test split
 
@@ -486,32 +508,35 @@ Chronological train / validation / test splits
 Parquet outputs
         │
         ▼
-ML pipeline (planned beyond the baseline)
-Training data ──→ popularity baseline ──→ collaborative filtering
-                                         └→ PyTorch two-tower model
-                                                   ↓
-                                  validation metrics and model selection
-                                                   ↓
-                                      final test evaluation
-                                                   ↓
-                                      MLflow experiment records
-                                                   ↓
-                             saved model and precomputed recommendations
-                                                   ↓
-                                    FastAPI + Redis serving
+ML pipeline (partly implemented)
+Training data ──→ popularity baseline
+        └─────────→ PyTorch two-tower + negative sampling
+                           ↓
+              validation ranking and cohort metrics
+                           ↓
+                local MLflow experiment records
+                           ↓
+        one test evaluation (used for this sample)
+                           ↓
+              batch bundle → FastAPI / optional Redis
+                           ↓
+             Docker / observability / AWS ECS path
 ```
 
-**Implemented:** PySpark preparation and the popularity baseline. Preparation
-reads JSONL, cleans and filters interactions, makes time-based splits, and
-writes Parquet. The popularity baseline ranks items by their training
-interaction counts and reports Hit Rate@K on held-out data.
+**Implemented:** the modeling path and the code/configuration for its batch
+job, API, Docker/Compose stack, Prometheus/OpenTelemetry, Kubernetes, chaos
+exercise, AWS/Terraform, Airflow, and Kafka event demo. A matched three-seed
+comparison and one test checkpoint are documented in [the two-tower study
+guide](two_tower_study_guide.md) and [test report](two_tower_test_report.md).
+Two-tower was modestly ahead of popularity on this sample; its test split is
+consumed and is not an untouched unbiased estimate.
 
-**Planned:** implicit collaborative filtering, the PyTorch two-tower model,
-Recall@10 and NDCG@10 evaluation, MLflow tracking, and API/container serving.
-The model approaches will use the same prepared splits so their results can be
-compared with the baseline. We have not built this full ML pipeline yet; as
-each part is implemented, document its actual inputs, outputs, run command,
-and checks in the corresponding step below.
+**Remaining:** runtime verification of Docker/Compose, a Kubernetes cluster,
+the Airflow scheduler, Kafka broker flow, a live cache-outage exercise, and
+AWS deployment. The 17.4M-row scale is also unverified; current bounded model
+steps collect selected data to the driver. Do not tune against the consumed
+test split. The [study guide concept map](two_tower_study_guide.md#concept-map-what-this-project-teaches-so-far)
+links each concept to its source and evidence.
 
 ## Batch processing: current job and production direction
 
@@ -569,14 +594,14 @@ storage paths, adding versioned writes and validation, and recording run
 metadata. These production changes are a design direction, not features that
 the current preparation script already provides.
 
-## Future phase: deploy the pipeline to AWS
+## AWS deployment direction and current status
 
-AWS deployment comes after the local data pipeline and model have been built
-and measured. Docker will package the batch and serving applications so they
-run consistently. Terraform will describe the AWS resources and permissions
-as code, allowing the environment to be reviewed and recreated. We will add
-the Terraform resources only when the local components and their resource
-needs are understood.
+The project includes Docker packaging for the serving API and Terraform
+configuration for an AWS ECS/Fargate path. Docker Compose has now been built
+and exercised locally end to end, including API serving, metrics/traces, and a
+Redis outage/recovery. This is local verification, not proof of AWS
+deployment: Terraform has not been applied. See the dated evidence in the
+[deployment walkthrough](deployment_walkthrough.md#end-to-end-run-record-2026-10-05).
 
 A possible deployment shape is:
 
@@ -618,11 +643,10 @@ guides.
 
 The AWS phase should proceed in this order:
 
-1. Finish and validate local preprocessing, model training/evaluation, and API
-   behavior; record expected runtime, memory, model artifact size, and request
-   shape.
-2. Build and run Docker images locally, keeping batch and API images separate
-   if their dependencies or resource needs differ.
+1. Validate preprocessing, model training/evaluation, and API behavior; record
+   runtime, memory, model artifact size, and request shape.
+2. Build and run the API image locally. A separate containerized Spark batch
+   workload is not part of the current Terraform deployment path.
 3. Choose AWS compute from measurements and account quotas. Keep the first
    deployment small and avoid making Lambda a hard dependency for the batch
    or model service.
@@ -632,10 +656,12 @@ The AWS phase should proceed in this order:
    Parquet and API response, then add monitoring and cost limits before any
    broader rollout.
 
-This is a future plan. The current project does not yet contain Docker
-deployment images, Terraform configuration, or AWS resources. We will add
-those artifacts after the local ML pipeline is implemented and we have
-measurements to guide the compute choice.
+The project contains a Docker image definition and Terraform configuration
+for the proposed API path, but neither has been used to deploy AWS resources
+from this machine. The deployment walkthrough records commands and
+prerequisites. A real deployment still needs local image/runtime verification,
+AWS credentials and quota checks, and a deliberate apply of potentially
+billable infrastructure.
 
 ### Step 1: PySpark preprocessing
 
@@ -663,6 +689,14 @@ cleaning pipeline.
 
 Run the preparation module with an input review JSONL file and an output
 directory. For example:
+
+The raw category review JSONL is not stored in Git. Download the `Movies and
+TV` review file from the [official Amazon Reviews 2023 dataset page](https://amazon-reviews-2023.github.io/),
+then decompress it to `data/raw/Movies_and_TV.jsonl`. The dataset page links
+the category-specific review file and documents its JSON fields, including
+`user_id`, `parent_asin`, and `timestamp`. The five-million-row command below
+uses that file as a development sample; omit `--limit` only when intentionally
+processing the full category.
 
 ```bash
 python -m src.data.prepare \
@@ -693,7 +727,11 @@ count, and breaks ties by item ID. Every user receives the same global top-K
 list. Since validation and test rows do not contribute to the counts, they
 remain held out for evaluation.
 
-Run the module with the directory written by preprocessing:
+Run the module with the directory written by preprocessing **only after the
+model and its settings are frozen**. The current CLI reads both validation and
+test and prints both hit rates. For iterative model selection, use the
+two-tower evaluator's same-sample popularity comparison; it reads validation
+only. This prevents accidentally using test results to choose a model.
 
 ```bash
 python -m src.models.popularity \
@@ -715,14 +753,15 @@ failed to initialize Spark's JVM; the notebook notes above describe using the
 WSL environment with Java 21 when that occurs. Python compilation can catch
 syntax errors but does not replace these Spark behavior checks.
 
-### Steps 3–7: add explanations as implemented
+### ML pipeline notes
 
-The remaining roadmap is implicit collaborative filtering, a PyTorch two-tower
-model, Recall@10 and NDCG@10 evaluation, MLflow tracking, then FastAPI and Docker
-serving. When each is implemented, extend this walkthrough with its data
-inputs, design choices, run command, evaluation or operational checks, and any
-known limitations. Keep explanations tied to the actual code and results so
-the notes do not promise behavior that has not been built yet.
+The current model workflow, full-catalog validation protocol, cohort results,
+MLflow run commands, test instructions, and implementation function map are
+maintained in [the two-tower study guide](two_tower_study_guide.md). The
+measured epoch curves and test-by-test outcomes are in
+[the test and training report](two_tower_test_report.md). This document keeps
+the broader data-pipeline and deployment plan; update it when those pieces are
+implemented rather than duplicating detailed model notes here.
 
 ## Spark troubleshooting log (WSL setup, 2026-10-03)
 

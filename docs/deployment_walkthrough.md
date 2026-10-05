@@ -22,8 +22,8 @@ instructions, use the [AWS deployment runbook](aws_deployment_runbook.md).
   model scoring when Redis is down. Model bundles can be local or downloaded
   from S3 at startup.
 - `Dockerfile` and `compose.yaml` define the API, Redis, Prometheus, and an
-  OpenTelemetry Collector stack. Compose configuration validated; containers
-  were not started because Docker Desktop/daemon was unavailable.
+  OpenTelemetry Collector stack. The stack was built and exercised locally on
+  2026-10-05; the full test record and limits appear below.
 - `deploy/kubernetes/recommender.yaml` provides a small Deployment and
   Service. `deploy/aws/` contains a Terraform ECS Fargate path.
 - `deploy/airflow/dags/recommender_batch.py` is a manually triggered DAG for
@@ -221,6 +221,54 @@ Terraform has not been applied; the AWS plan requires Docker, an authenticated
 profile, and an account default VPC with public subnets. Fargate is selected
 because the account's Lambda memory limit is 512 MB.
 
+### End-to-end run record (2026-10-05)
+
+This run tested the actual prepared data through batch training, validation,
+serving-artifact export, Docker image build, FastAPI, Redis, Prometheus, and the
+OpenTelemetry Collector. It used the WSL Python 3.11 / Java 21 / Spark 4.2
+environment and the local Docker engine. It did not apply Terraform or deploy
+to AWS.
+
+The batch command used 500 users, at most 30,000 training pairs, two epochs,
+seed 42, and the prepared `movies_tv_5m` dataset. It completed successfully:
+epoch 1 training/validation BPR loss was 0.693139 / 0.693128; epoch 2 was
+0.692850 / 0.693125, so epoch 2 was selected. It evaluated 500 validation
+users against all 137,070 catalog items and wrote a checkpoint, validation
+report, serving directory, and `model_bundle.zip` under
+`artifacts/e2e_run_2026-10-05/`. The two-tower model got 0% Recall@10 and
+Recall@20; popularity on the same users got 1.4% and 1.8%. This passed the
+batch/artifact plumbing check, not a model-quality gate.
+
+The API image initially measured 3.49 GB because the API imported the training
+module to load a checkpoint, pulling Spark and MLflow into serving. Checkpoint
+loading now lives in `src.models.two_tower`, which lets the API avoid those
+training-only dependencies. The Dockerfile installs CPU-only PyTorch; the
+rebuilt image measured 1.57 GB. The image built and Compose started healthy
+API, Redis, Prometheus, and Collector containers.
+
+Serving checks passed: `/ready` returned `ready`; `/model-info` reported 500
+users, 137,070 items, and 16-dimensional embeddings; a known user received
+five recommendations; a user absent from the model vocabulary received 404.
+The five recommendations had no overlap with that user's five training-seen
+items. Prometheus reported the `api:8000` target `up`, and its counters showed
+successful/unknown-user requests and Redis cache hits. Collector logs showed
+OTLP request spans.
+
+For the cache-outage check, Redis was stopped and a fresh user/limit request
+still returned HTTP 200. `recommendation_cache_errors_total` rose to 2 (read
+and write failures), but that uncached request took about 7.94 seconds. Redis
+was restarted; a fresh key and repeat request succeeded and Redis cache hits
+resumed. This verifies fallback and recovery behavior, while exposing slow
+failure latency that should be fixed before treating the fallback as
+production-ready. The final local Compose stack is left running for inspection
+at `http://localhost:8000` and `http://localhost:9090`; stop it with
+`docker compose down` from WSL in the repository directory.
+
+After separating checkpoint loading, the full WSL pytest suite also passed:
+**99 passed, 1 non-failing PySpark/Pandas compatibility warning, 27.17
+seconds**. These synthetic behavior tests complement, but do not replace, the
+real-data batch and serving checks above.
+
 ## Airflow and Kafka demos
 
 Airflow is an optional dependency, kept out of the everyday project install:
@@ -252,6 +300,11 @@ does not consume Kafka synchronously.
 Run all tests in WSL using the full-suite command in the study guide. Focused
 deployment tests cover the API, event schema, and model-registration gate:
 `python -m pytest tests/test_api.py tests/test_event_schema.py tests/test_model_registration.py -q`.
+The [test report](two_tower_test_report.md#complete-pytest-inventory-and-pass-criteria)
+lists every one of the 99 collected pytest cases and its pass condition. It
+also gives separate pass criteria for configuration checks, batch smoke,
+offline evaluation, and external-runtime exercises; those are not included in
+the pytest count.
 Terraform syntax was formatted and `terraform validate` passed after provider
 initialization. `docker compose config --quiet` passed. The batch smoke job
 ran end-to-end on 500 users, exported a model bundle, and wrote validation
