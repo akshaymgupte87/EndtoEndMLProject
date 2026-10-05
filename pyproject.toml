@@ -28,6 +28,8 @@ prepare-recommender-data = "src.data.prepare:main"
 popularity-baseline = "src.models.popularity:main"
 prepare-tower-data = "src.models.prepare_tower_data:main"
 train-two-tower = "src.models.train_two_tower:main"
+evaluate-two-tower = "src.models.evaluate_two_tower:main"
+train-implicit-als = "src.models.collaborative_filtering:main"
 demo-two-tower = "src.models.demo_two_tower:main"
 
 [build-system]

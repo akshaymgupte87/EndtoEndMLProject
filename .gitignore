@@ -21,6 +21,9 @@ data/
 artifacts/
 mlruns/
 mlartifacts/
+mlflow.db
+mlflow.db-shm
+mlflow.db-wal
 spark-warehouse/
 derby.log
 metastore_db/

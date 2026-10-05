@@ -6,18 +6,6 @@ from pyspark.sql import SparkSession
 from src.models.popularity import evaluate_hit_rate, rank_popular_items
 
 
-@pytest.fixture(scope="module")
-def spark() -> SparkSession:
-    session = (
-        SparkSession.builder.master("local[2]")
-        .appName("popularity-tests")
-        .config("spark.ui.enabled", "false")
-        .getOrCreate()
-    )
-    yield session
-    session.stop()
-
-
 def test_rank_popular_items_orders_counts_and_breaks_ties(spark: SparkSession) -> None:
     train = spark.createDataFrame(
         [

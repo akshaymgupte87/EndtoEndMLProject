@@ -17,6 +17,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.models.sampling import UniformNegativeSampler, build_seen_items
+from src.models.experiment_tracking import log_experiment_run
 from src.models.two_tower import PairwiseTrainingDataset, TwoTowerRecommender, bpr_loss
 
 
@@ -353,6 +354,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--shuffle-partitions", type=int, default=32)
+    parser.add_argument("--mlflow-experiment", default="two-tower-recommender")
+    parser.add_argument("--mlflow-tracking-uri", default="sqlite:///mlflow.db")
     args = parser.parse_args()
     if args.max_users < 1 or args.max_train_pairs < 1 or args.shuffle_partitions < 1:
         parser.error("max-users, max-train-pairs, and shuffle-partitions must be positive")
@@ -393,7 +396,9 @@ def main() -> None:
             item_mapping_path=str(args.data / "item_mapping"),
             checkpoint_path=args.output / "best_model.pt",
         )
-        (args.output / "history.json").write_text(
+        history_path = args.output / "history.json"
+        checkpoint_path = args.output / "best_model.pt"
+        history_path.write_text(
             json.dumps(
                 {
                     "best_epoch": result.best_epoch,
@@ -410,7 +415,30 @@ def main() -> None:
         )
         print(f"Best epoch: {result.best_epoch}")
         print(f"Best validation BPR loss: {result.best_validation_loss:.6f}")
-        print(f"Checkpoint written to: {args.output / 'best_model.pt'}")
+        print(f"Checkpoint written to: {checkpoint_path}")
+        run_id = log_experiment_run(
+            experiment_name=args.mlflow_experiment,
+            run_name=f"train-seed-{config.seed}-users-{len(model_user_ids)}",
+            parameters={
+                **asdict(config),
+                "max_users": args.max_users,
+                "max_train_pairs": args.max_train_pairs,
+                "actual_users": len(model_user_ids),
+                "actual_train_pairs": len(train_pairs),
+                "actual_validation_pairs": len(validation_pairs),
+                "catalog_items": num_items,
+                "data_path": str(args.data),
+            },
+            metrics={
+                "best_validation_bpr_loss": result.best_validation_loss,
+                "best_epoch": float(result.best_epoch),
+            },
+            step_metrics=result.history,
+            artifacts=[history_path, checkpoint_path],
+            tags={"stage": "training", "model": "two_tower"},
+            tracking_uri=args.mlflow_tracking_uri,
+        )
+        print(f"MLflow run: {run_id}")
     finally:
         spark.stop()
 
