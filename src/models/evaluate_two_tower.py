@@ -34,8 +34,9 @@ def recommend_top_k(
     seen_items_by_user: Mapping[int, Set[int]],
     k: int,
     batch_size: int = 128,
+    candidate_items: Sequence[int] | None = None,
 ) -> dict[int, list[int]]:
-    """Rank the catalog for model-local users, excluding each user's train items.
+    """Rank all or selected catalog items for model-local users.
 
     User indices here address rows in this particular model checkpoint. Seen
     item sets must contain model catalog indices and should come from training
@@ -58,8 +59,16 @@ def recommend_top_k(
     if len(set(users)) != len(users):
         raise ValueError("user_indices must not contain duplicates")
 
+    catalog = list(range(model.num_items)) if candidate_items is None else list(candidate_items)
+    if not catalog or len(catalog) != len(set(catalog)):
+        raise ValueError("candidate_items must be non-empty and unique")
+    if any(isinstance(item, bool) or not isinstance(item, Integral) for item in catalog):
+        raise TypeError("candidate item indices must be integers")
+    if any(item < 0 or item >= model.num_items for item in catalog):
+        raise ValueError("candidate item index is outside the model catalog")
     device = next(model.parameters()).device
-    item_indices = torch.arange(model.num_items, dtype=torch.long, device=device)
+    item_indices = torch.tensor(catalog, dtype=torch.long, device=device)
+    catalog_positions = {item_id: position for position, item_id in enumerate(catalog)}
     recommendations: dict[int, list[int]] = {}
     model.eval()
     with torch.inference_mode():
@@ -77,15 +86,16 @@ def recommend_top_k(
                         raise TypeError("seen item indices must be integers")
                     if item_idx < 0 or item_idx >= model.num_items:
                         raise ValueError("seen item index is outside the item table")
-                if seen_items:
-                    scores[row_idx, list(seen_items)] = -torch.inf
-                available = model.num_items - len(seen_items)
+                seen_positions = [catalog_positions[item] for item in seen_items if item in catalog_positions]
+                if seen_positions:
+                    scores[row_idx, seen_positions] = -torch.inf
+                available = len(catalog) - len(seen_positions)
                 result_size = min(k, available)
                 if result_size == 0:
                     recommendations[user_idx] = []
                 else:
                     top_indices = torch.topk(scores[row_idx], k=result_size).indices
-                    recommendations[user_idx] = top_indices.cpu().tolist()
+                    recommendations[user_idx] = [catalog[position] for position in top_indices.cpu().tolist()]
     return recommendations
 
 
@@ -140,14 +150,18 @@ def recommend_popular_top_k(
     popularity_order: Sequence[int],
     seen_items_by_user: Mapping[int, Set[int]],
     k: int,
+    candidate_items: Sequence[int] | None = None,
 ) -> dict[int, list[int]]:
     """Return the same global popularity ranking with each user's seen items removed."""
     _validate_k(k)
     recommendations: dict[int, list[int]] = {}
+    allowed = None if candidate_items is None else set(candidate_items)
     for user_idx in user_indices:
         seen_items = seen_items_by_user.get(user_idx, frozenset())
         ranked: list[int] = []
         for item_idx in popularity_order:
+            if allowed is not None and item_idx not in allowed:
+                continue
             if item_idx not in seen_items:
                 ranked.append(item_idx)
                 if len(ranked) == k:
@@ -238,12 +252,15 @@ def _metrics_by_cohort(
     return result
 
 
-def _load_validation_examples(
+def _load_evaluation_examples(
     spark: SparkSession,
     data_path: Path,
     model_user_ids: list[int],
+    split: str = "validation",
 ) -> tuple[dict[int, set[int]], dict[int, set[int]], int, dict[int, int]]:
-    """Load selected users' complete training histories and validation targets."""
+    """Load training histories and targets from one explicitly selected split."""
+    if split not in {"validation", "test"}:
+        raise ValueError("split must be 'validation' or 'test'")
     if not model_user_ids or len(set(model_user_ids)) != len(model_user_ids):
         raise ValueError("checkpoint must contain unique source user IDs")
     source_to_local = {
@@ -254,7 +271,7 @@ def _load_validation_examples(
         [(user_idx,) for user_idx in model_user_ids], user_schema
     )
     train = spark.read.parquet(str(data_path / "train")).select("user_idx", "item_idx")
-    validation = spark.read.parquet(str(data_path / "validation")).select(
+    targets = spark.read.parquet(str(data_path / split)).select(
         "user_idx", "item_idx"
     )
     train_rows = (
@@ -262,8 +279,8 @@ def _load_validation_examples(
         .select("user_idx", "item_idx")
         .collect()
     )
-    validation_rows = (
-        validation.join(selected_users, "user_idx", "inner")
+    target_rows = (
+        targets.join(selected_users, "user_idx", "inner")
         .select("user_idx", "item_idx")
         .collect()
     )
@@ -278,7 +295,7 @@ def _load_validation_examples(
 
     relevant_items: dict[int, set[int]] = defaultdict(set)
     skipped_seen_validation_rows = 0
-    for row in validation_rows:
+    for row in target_rows:
         local_user = source_to_local[int(row.user_idx)]
         item_idx = int(row.item_idx)
         if item_idx in train_seen[local_user]:
@@ -293,14 +310,27 @@ def _load_validation_examples(
     )
 
 
+def _load_validation_examples(
+    spark: SparkSession,
+    data_path: Path,
+    model_user_ids: list[int],
+) -> tuple[dict[int, set[int]], dict[int, set[int]], int, dict[int, int]]:
+    """Backward-compatible validation-only loader."""
+    return _load_evaluation_examples(spark, data_path, model_user_ids, "validation")
+
+
 def evaluate_validation(
     checkpoint_path: Path,
     data_path: Path,
     ks: Sequence[int],
     batch_size: int = 128,
     shuffle_partitions: int = 32,
+    candidate_item_indices: Sequence[int] | None = None,
+    split: str = "validation",
 ) -> dict[str, Any]:
-    """Evaluate only validation targets for users represented in a checkpoint."""
+    """Evaluate one explicitly chosen holdout split for checkpoint users."""
+    if split not in {"validation", "test"}:
+        raise ValueError("split must be 'validation' or 'test'")
     if not ks:
         raise ValueError("provide at least one K value")
     for k in ks:
@@ -329,12 +359,12 @@ def evaluate_validation(
             relevant_items,
             skipped_seen_rows,
             train_item_counts,
-        ) = _load_validation_examples(spark, data_path, model_user_ids)
+        ) = _load_evaluation_examples(spark, data_path, model_user_ids, split)
     finally:
         spark.stop()
 
     if not relevant_items:
-        raise ValueError("no validation targets remain after excluding training items")
+        raise ValueError(f"no {split} targets remain after excluding training items")
     users_to_rank = sorted(relevant_items)
     max_k = max(ks)
     ranked = recommend_top_k(
@@ -343,26 +373,38 @@ def evaluate_validation(
         train_seen,
         k=max_k,
         batch_size=batch_size,
+        candidate_items=candidate_item_indices,
     )
     popularity_order = sorted(
         range(model.num_items), key=lambda item_idx: (-train_item_counts.get(item_idx, 0), item_idx)
     )
     popularity_ranked = recommend_popular_top_k(
-        users_to_rank, popularity_order, train_seen, max_k
+        users_to_rank, popularity_order, train_seen, max_k,
+        candidate_items=candidate_item_indices,
     )
     ranked_by_method = {
         "two_tower": ranked,
         "popularity_baseline_on_same_user_sample": popularity_ranked,
     }
+    candidate_item_set = (
+        set(range(model.num_items))
+        if candidate_item_indices is None
+        else set(candidate_item_indices)
+    )
     return {
-        "split": "validation",
-        "protocol": "full catalog; each user's training items are removed from candidates",
+        "split": split,
+        "protocol": "shared candidate catalog; each user's training items are removed",
         "checkpoint": str(checkpoint_path),
         "data": str(data_path),
         "model_users": model.num_users,
         "users_evaluated": len(users_to_rank),
         "catalog_items": model.num_items,
+        "candidate_items": model.num_items if candidate_item_indices is None else len(candidate_item_indices),
         "validation_targets_evaluated": sum(len(items) for items in relevant_items.values()),
+        "validation_targets_outside_candidate_catalog": sum(
+            item not in candidate_item_set
+            for items in relevant_items.values() for item in items
+        ) if candidate_item_indices is not None else 0,
         "validation_rows_skipped_because_item_was_seen_in_training": skipped_seen_rows,
         "metrics_at_k": {
             "two_tower": {
@@ -384,24 +426,41 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--data", type=Path, required=True, help="Encoded two-tower data directory")
     parser.add_argument("--output", type=Path, required=True, help="JSON metrics output path")
+    parser.add_argument(
+        "--split", choices=("validation", "test"), default="validation",
+        help="Holdout split to read; use test only once after model selection is frozen.",
+    )
     parser.add_argument("--k", type=int, nargs="+", default=[10, 20])
     parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--candidate-items", type=Path, help="JSON candidate list from comparison cohort")
     parser.add_argument("--shuffle-partitions", type=int, default=32)
     parser.add_argument("--mlflow-experiment", default="two-tower-recommender")
     parser.add_argument("--mlflow-tracking-uri", default="sqlite:///mlflow.db")
     args = parser.parse_args()
 
+    candidate_items = None
+    if args.candidate_items:
+        candidate_items = json.loads(args.candidate_items.read_text(encoding="utf-8"))
+        if not isinstance(candidate_items, list):
+            parser.error("--candidate-items must contain a JSON array")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in candidate_items
+        ):
+            parser.error("--candidate-items must contain non-negative integer item indices")
     result = evaluate_validation(
         args.checkpoint,
         args.data,
         args.k,
         batch_size=args.batch_size,
         shuffle_partitions=args.shuffle_partitions,
+        candidate_item_indices=candidate_items,
+        split=args.split,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
-    print(f"Validation metrics written to: {args.output}")
+    print(f"{args.split.capitalize()} metrics written to: {args.output}")
     logged_metrics: dict[str, float] = {}
     for method, metrics_by_k in result["metrics_at_k"].items():
         for k, values in metrics_by_k.items():
@@ -418,7 +477,7 @@ def main() -> None:
                     ] = float(values[metric_name])
     run_id = log_experiment_run(
         experiment_name=args.mlflow_experiment,
-        run_name=f"evaluate-{args.checkpoint.parent.name}",
+        run_name=f"evaluate-{args.split}-{args.checkpoint.parent.name}",
         parameters={
             "checkpoint": str(args.checkpoint),
             "data_path": str(args.data),
@@ -428,7 +487,7 @@ def main() -> None:
         },
         metrics=logged_metrics,
         artifacts=[args.output],
-        tags={"stage": "validation_evaluation", "model": "two_tower"},
+        tags={"stage": f"{args.split}_evaluation", "model": "two_tower"},
         tracking_uri=args.mlflow_tracking_uri,
     )
     print(f"MLflow run: {run_id}")

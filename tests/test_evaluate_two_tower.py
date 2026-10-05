@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from src.models.evaluate_two_tower import (
+    _load_evaluation_examples,
     _load_validation_examples,
     _metrics_by_cohort,
     ranking_metrics_at_k,
@@ -50,6 +51,23 @@ def test_recommend_top_k_excludes_each_users_training_items() -> None:
     assert not ({0, 2} & set(ranked[0]))
 
 
+def test_recommend_top_k_respects_shared_candidate_catalog() -> None:
+    model = TwoTowerRecommender(num_users=1, num_items=5, embedding_dim=1)
+    with torch.no_grad():
+        model.user_embedding.weight.fill_(1.0)
+        model.item_embedding.weight.copy_(torch.tensor([[10.0], [9.0], [8.0], [7.0], [6.0]]))
+
+    ranked = recommend_top_k(
+        model,
+        user_indices=[0],
+        seen_items_by_user={0: {3}},
+        k=2,
+        candidate_items=[1, 3, 4],
+    )
+
+    assert ranked == {0: [1, 4]}
+
+
 def test_popularity_ranking_also_excludes_each_users_training_items() -> None:
     ranked = recommend_popular_top_k(
         user_indices=[0, 1],
@@ -59,6 +77,18 @@ def test_popularity_ranking_also_excludes_each_users_training_items() -> None:
     )
 
     assert ranked == {0: [2, 3], 1: [0, 1]}
+
+
+def test_popularity_ranking_respects_shared_candidate_catalog() -> None:
+    ranked = recommend_popular_top_k(
+        user_indices=[0],
+        popularity_order=[0, 1, 2, 3],
+        seen_items_by_user={0: set()},
+        k=2,
+        candidate_items=[2, 3],
+    )
+
+    assert ranked == {0: [2, 3]}
 
 
 def test_metrics_by_cohort_reports_user_history_and_target_popularity_groups() -> None:
@@ -121,3 +151,29 @@ def test_validation_loader_keeps_selected_users_and_skips_train_seen_targets(
     assert relevant == {0: {3}, 1: {4}}
     assert skipped == 1
     assert item_counts == {0: 1, 1: 1, 2: 1}
+
+
+def test_evaluation_loader_reads_only_the_requested_holdout_split(spark, tmp_path) -> None:
+    data_path = tmp_path / "encoded"
+    data_path.mkdir()
+    spark.createDataFrame(
+        [(10, 0), (10, 1)], "user_idx long, item_idx long"
+    ).write.parquet(str(data_path / "train"))
+    spark.createDataFrame(
+        [(10, 2)], "user_idx long, item_idx long"
+    ).write.parquet(str(data_path / "validation"))
+    spark.createDataFrame(
+        [(10, 3)], "user_idx long, item_idx long"
+    ).write.parquet(str(data_path / "test"))
+
+    _, validation_targets, _, _ = _load_evaluation_examples(
+        spark, data_path, [10], split="validation"
+    )
+    _, test_targets, _, _ = _load_evaluation_examples(
+        spark, data_path, [10], split="test"
+    )
+
+    assert validation_targets == {0: {2}}
+    assert test_targets == {0: {3}}
+    with pytest.raises(ValueError, match="split must be"):
+        _load_evaluation_examples(spark, data_path, [10], split="train")

@@ -7,7 +7,7 @@ import json
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 from pyspark.sql import SparkSession
@@ -262,8 +262,9 @@ def _read_sampled_pairs(
     max_users: int,
     max_train_pairs: int,
     seed: int,
+    user_ids: Sequence[int] | None = None,
 ) -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[int], int]:
-    """Read full histories for a seeded subset of train/validation users."""
+    """Read complete histories for a seeded sample or an explicitly fixed cohort."""
     train = spark.read.parquet(str(data_path / "train")).select("user_idx", "item_idx")
     validation = spark.read.parquet(str(data_path / "validation")).select(
         "user_idx", "item_idx"
@@ -284,15 +285,31 @@ def _read_sampled_pairs(
     ):
         raise ValueError("item_mapping must contain contiguous, unique indices starting at zero")
 
-    eligible_users = (
-        train.select("user_idx")
-        .distinct()
-        .join(validation.select("user_idx").distinct(), "user_idx", "inner")
-        .orderBy(F.rand(seed))
-        .limit(max_users)
-        .collect()
-    )
-    candidate_ids = [int(row.user_idx) for row in eligible_users]
+    if user_ids is None:
+        eligible_users = (
+            train.select("user_idx")
+            .distinct()
+            .join(validation.select("user_idx").distinct(), "user_idx", "inner")
+            .orderBy(F.rand(seed))
+            .limit(max_users)
+            .collect()
+        )
+        candidate_ids = [int(row.user_idx) for row in eligible_users]
+    else:
+        candidate_ids = list(user_ids)
+        if not candidate_ids or len(candidate_ids) > max_users:
+            raise ValueError("fixed cohort must be non-empty and no larger than --max-users")
+        if len(set(candidate_ids)) != len(candidate_ids):
+            raise ValueError("fixed cohort user IDs must be unique")
+        requested_schema = StructType([StructField("user_idx", LongType(), nullable=False)])
+        requested = spark.createDataFrame([(user_id,) for user_id in candidate_ids], requested_schema)
+        eligible_count = (
+            requested.join(train.select("user_idx").distinct(), "user_idx", "inner")
+            .join(validation.select("user_idx").distinct(), "user_idx", "inner")
+            .count()
+        )
+        if eligible_count != len(candidate_ids):
+            raise ValueError("every fixed cohort user must occur in both train and validation")
     if not candidate_ids:
         raise ValueError("no users occur in both encoded train and validation splits")
     candidate_schema = StructType([StructField("user_idx", LongType(), nullable=False)])
@@ -309,6 +326,8 @@ def _read_sampled_pairs(
     selected_rows = 0
     for user_id in candidate_ids:
         user_rows = counts[user_id]
+        if user_ids is not None and selected_rows + user_rows > max_train_pairs:
+            raise ValueError("fixed cohort exceeds --max-train-pairs; raise the limit")
         if selected_rows + user_rows <= max_train_pairs:
             selected_ids.append(user_id)
             selected_rows += user_rows
@@ -346,6 +365,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True, help="Model artifact directory")
     parser.add_argument("--max-users", type=int, default=2000)
     parser.add_argument("--max-train-pairs", type=int, default=100_000)
+    parser.add_argument("--user-ids-file", type=Path, help="JSON list from prepare_comparison_cohort")
     parser.add_argument("--embedding-dim", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--epochs", type=int, default=10)
@@ -359,6 +379,17 @@ def main() -> None:
     args = parser.parse_args()
     if args.max_users < 1 or args.max_train_pairs < 1 or args.shuffle_partitions < 1:
         parser.error("max-users, max-train-pairs, and shuffle-partitions must be positive")
+    fixed_user_ids = None
+    if args.user_ids_file is not None:
+        try:
+            fixed_user_ids = json.loads(args.user_ids_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            parser.error(f"could not read --user-ids-file: {exc}")
+        if not isinstance(fixed_user_ids, list) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in fixed_user_ids
+        ):
+            parser.error("--user-ids-file must contain a JSON array of non-negative integer indices")
 
     config = TrainingConfig(
         embedding_dim=args.embedding_dim,
@@ -385,6 +416,7 @@ def main() -> None:
             args.max_users,
             args.max_train_pairs,
             args.seed,
+            user_ids=fixed_user_ids,
         )
         result = train_two_tower(
             train_pairs,
@@ -423,6 +455,8 @@ def main() -> None:
                 **asdict(config),
                 "max_users": args.max_users,
                 "max_train_pairs": args.max_train_pairs,
+                "fixed_cohort": args.user_ids_file is not None,
+                "cohort_file": str(args.user_ids_file) if args.user_ids_file else "seeded_sample",
                 "actual_users": len(model_user_ids),
                 "actual_train_pairs": len(train_pairs),
                 "actual_validation_pairs": len(validation_pairs),
