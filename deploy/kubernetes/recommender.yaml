@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recommender-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recommender-api
+  template:
+    metadata:
+      labels:
+        app: recommender-api
+    spec:
+      containers:
+        - name: api
+          image: endtoendmlproject:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: MODEL_DIR
+              value: /models
+          volumeMounts:
+            - name: model-artifacts
+              mountPath: /models
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+      volumes:
+        - name: model-artifacts
+          hostPath:
+            path: /models
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recommender-api
+spec:
+  selector:
+    app: recommender-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+  type: ClusterIP

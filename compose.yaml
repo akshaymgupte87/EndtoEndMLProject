@@ -1,0 +1,55 @@
+services:
+  api:
+    build: .
+    environment:
+      MODEL_DIR: /models
+      REDIS_URL: redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+    volumes:
+      - ${MODEL_DIR:-./artifacts/model_selection/two_tower_seed42/serving}:/models:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready')"]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.136.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./deploy/otel/collector.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4318:4318"
+
+  kafka:
+    image: apache/kafka:3.9.1
+    profiles: ["events"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 1
+    ports:
+      - "9092:9092"

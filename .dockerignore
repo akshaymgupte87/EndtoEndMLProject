@@ -1,0 +1,13 @@
+.git
+.idea
+.venv
+venv
+__pycache__
+.pytest_cache
+.cache
+data
+artifacts
+mlruns
+mlflow.db*
+.terraform
+*.tfstate*
