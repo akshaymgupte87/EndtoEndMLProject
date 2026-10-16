@@ -52,9 +52,27 @@ resource "aws_ecr_repository" "api" {
   }
 }
 
+resource "aws_ecr_repository" "training" {
+  name                 = "${local.name}-training"
+  image_tag_mutability = "IMMUTABLE"
+  force_delete         = false
+
+  image_scanning_configuration {
+    scan_on_push = true
+  }
+}
+
 resource "aws_s3_bucket" "models" {
   bucket_prefix = "${local.name}-models-"
   force_destroy = false
+}
+
+resource "aws_s3_bucket_versioning" "models" {
+  bucket = aws_s3_bucket.models.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "models" {
@@ -185,6 +203,110 @@ resource "aws_sagemaker_mlflow_tracking_server" "main" {
   automatic_model_registration = true
 
   depends_on = [aws_iam_role_policy.mlflow_server]
+}
+
+resource "aws_iam_role" "sagemaker_pipeline" {
+  name = "${local.name}-pipeline"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect    = "Allow",
+      Principal = { Service = "sagemaker.amazonaws.com" },
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "sagemaker_pipeline" {
+  name = "run-training-jobs"
+  role = aws_iam_role.sagemaker_pipeline.id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "sagemaker:CreateTrainingJob",
+          "sagemaker:DescribeTrainingJob",
+          "sagemaker:StopTrainingJob",
+          "sagemaker:AddTags"
+        ],
+        Resource = "*"
+      },
+      {
+        Effect    = "Allow",
+        Action    = ["iam:PassRole"],
+        Resource  = aws_iam_role.sagemaker_training.arn,
+        Condition = { StringLike = { "iam:PassedToService" = "sagemaker.amazonaws.com" } }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role" "sagemaker_training" {
+  name = "${local.name}-training"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect    = "Allow",
+      Principal = { Service = "sagemaker.amazonaws.com" },
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "sagemaker_training" {
+  name = "train-promote-bundle-refresh-api"
+  role = aws_iam_role.sagemaker_training.id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect   = "Allow",
+        Action   = ["s3:GetObject"],
+        Resource = "${aws_s3_bucket.models.arn}/training-data/*"
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["s3:GetBucketLocation"],
+        Resource = aws_s3_bucket.models.arn
+      },
+      {
+        Effect    = "Allow",
+        Action    = ["s3:ListBucket"],
+        Resource  = aws_s3_bucket.models.arn,
+        Condition = { StringLike = { "s3:prefix" = ["training-data/*"] } }
+      },
+      {
+        Effect = "Allow",
+        Action = ["s3:PutObject"],
+        Resource = [
+          "${aws_s3_bucket.models.arn}/${var.model_bundle_key}",
+          "${aws_s3_bucket.models.arn}/training-job-output/*"
+        ]
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:CreateLogGroup"],
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["ecr:GetAuthorizationToken"],
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer", "ecr:BatchGetImage"],
+        Resource = aws_ecr_repository.training.arn
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["ecs:UpdateService"],
+        Resource = aws_ecs_service.api.id
+      }
+    ]
+  })
 }
 
 resource "aws_ecs_cluster" "main" {

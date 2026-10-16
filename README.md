@@ -149,6 +149,8 @@ For the current guided deployment checkpoint and copy-ready commands, see the
 monitoring, costs, and cleanup. Optional SageMaker MLflow experiment tracking,
 SageMaker Model Registry synchronization, and Bedrock explanations are covered
 in the [AWS MLflow and Bedrock guide](docs/aws_mlflow_bedrock.md).
+The SageMaker training-to-ECS deployment workflow is described in the
+[AWS cloud ML pipeline guide](docs/aws_cloud_ml_pipeline.md).
 
 The Terraform in `deploy/aws` provisions an ECR repository, encrypted private
 S3 model bucket, ECS/Fargate API, CloudWatch logs/alarms/dashboard, and a
@@ -172,18 +174,15 @@ gets invocation access only for the configured model. See the
 [AWS MLflow and Bedrock guide](docs/aws_mlflow_bedrock.md) for setup and request
 examples.
 
-SageMaker is best used for managed custom-model training, processing jobs,
-model registry, and hosted inference endpoints. The current two-tower model is
-already served efficiently inside this API from a versioned S3 bundle, so a
-SageMaker endpoint is optional and would add ongoing endpoint cost. The
-training scripts can be adapted into SageMaker processing/training jobs after
-data is staged in S3, with approved artifacts promoted back to the serving
-bundle format. SageMaker real-time endpoints could replace in-process serving
-if custom inference scaling or hosting is needed. By default, Terraform does
-not create SageMaker resources. An opt-in small managed MLflow server can track
-the notebook's local/WSL training and synchronize gated models to SageMaker
-Model Registry; SageMaker Training Jobs and real-time endpoints remain separate
-future options. Review the optional guide and current costs before enabling it.
+The SageMaker pipeline runs the batch training and validation workflow as a
+managed Training Job after encoded data is staged in S3. It promotes the
+resulting gated bundle to the API's S3 key and refreshes the ECS/Fargate
+FastAPI service. The API continues to serve recommendations from that bundle;
+a SageMaker inference endpoint is not required. The pipeline infrastructure
+and images are created only after applying the Terraform setup in the
+[cloud ML pipeline guide](docs/aws_cloud_ml_pipeline.md). An opt-in managed
+MLflow server can separately track experiments and synchronize model registry
+entries. Review the guide and current AWS costs before running cloud jobs.
 
 Run the test suite in the configured Linux/WSL environment:
 

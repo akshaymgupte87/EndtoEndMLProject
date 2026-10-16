@@ -1,0 +1,15 @@
+FROM python:3.11-slim-trixie
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 PYTHONPATH=/app
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openjdk-21-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 'torch>=2.6,<3' \
+    && pip install --no-cache-dir 'mlflow>=3,<4' 'numpy>=2,<3' 'pyspark>=4,<5' 'boto3>=1.35,<2'
+
+ENTRYPOINT ["python", "-m", "src.pipeline.sagemaker_train"]

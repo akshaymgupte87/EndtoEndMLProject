@@ -1,5 +1,33 @@
 # Two-Tower Project: Test and Training Report
 
+## Local notebook training run (2026-10-16)
+
+The local workflow was run from `notebooks/local_training_pipeline.ipynb` in
+WSL with Python 3.11.13, PySpark 4.2.0, and the prepared Movies & TV dataset.
+It trained the two-tower model for 10 epochs on a seeded sample of 2,000
+users (22,313 train pairs and 2,000 validation pairs), with a catalog of
+137,070 items. The best validation BPR loss was 0.688930 at epoch 10.
+
+On the same 2,000-user validation sample, the two-tower did not beat the
+training-only popularity baseline:
+
+| Model | Recall@10 | NDCG@10 | Recall@20 | NDCG@20 |
+|---|---:|---:|---:|---:|
+| Two-tower | 0.0090 | 0.004225 | 0.0150 | 0.005747 |
+| Popularity baseline | 0.0155 | 0.007535 | 0.0225 | 0.009349 |
+
+The validation quality gate correctly failed: two-tower NDCG@10 lift was
+-43.925%, below the required +5%. The exported serving bundle therefore
+selects the popularity fallback. This is a successful pipeline run and a
+negative model-quality result; it does not mean the two-tower model was
+promoted. Validation was used for this decision; the test split was not used.
+
+Run outputs, including the checkpoint, MLflow SQLite store, validation
+metrics, serving bundle, and `batch_manifest.json`, are under
+`artifacts/local_training_20261016T183743Z/` in the local checkout. This
+small bounded run verifies the end-to-end local workflow, not production-scale
+training or final model performance.
+
 ## Test run
 
 **Date:** 2026-10-05  

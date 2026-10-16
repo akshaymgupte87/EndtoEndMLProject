@@ -2,6 +2,18 @@ output "ecr_repository_url" {
   value = aws_ecr_repository.api.repository_url
 }
 
+output "training_ecr_repository_url" {
+  value = aws_ecr_repository.training.repository_url
+}
+
+output "sagemaker_pipeline_role_arn" {
+  value = aws_iam_role.sagemaker_pipeline.arn
+}
+
+output "sagemaker_training_role_arn" {
+  value = aws_iam_role.sagemaker_training.arn
+}
+
 output "model_bucket" {
   value = aws_s3_bucket.models.bucket
 }

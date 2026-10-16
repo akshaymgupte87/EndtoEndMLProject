@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and replace the two required placeholders.
+# Keep terraform.tfvars local; it is ignored by .gitignore.
+
+aws_region       = "us-west-2"
+project_name     = "recommender-demo"
+container_image  = "000000000000.dkr.ecr.us-west-2.amazonaws.com/recommender-demo:bootstrap"
+model_bundle_key = "models/model_bundle.zip"
+client_cidrs     = ["REPLACE_WITH_YOUR_PUBLIC_IPV4/32"]
+bedrock_model_id = ""
+deploy_service          = false
+enable_sagemaker_mlflow = false

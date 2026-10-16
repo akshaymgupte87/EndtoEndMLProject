@@ -26,6 +26,9 @@ dependencies = [
 [project.optional-dependencies]
 airflow = ["apache-airflow>=2.10,<4"]
 sagemaker-mlflow = ["mlflow==3.0.0", "sagemaker-mlflow"]
+sagemaker-pipeline = [
+    "sagemaker>=2.240,<3",
+]
 
 [dependency-groups]
 dev = [
