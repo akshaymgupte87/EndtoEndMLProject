@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from src.models.train_two_tower import load_two_tower_checkpoint
+from src.models.register_model import check_validation_gate
 
 
 def _run(command: list[str], env: dict[str, str] | None = None) -> None:
@@ -27,6 +28,7 @@ def export_serving_artifacts(
     output: Path,
     checkpoint: Path,
     lineage: dict[str, object] | None = None,
+    popularity_item_indices: list[int] | None = None,
 ) -> Path:
     model, metadata = load_two_tower_checkpoint(checkpoint, device="cpu")
     lineage = lineage or {}
@@ -72,6 +74,14 @@ def export_serving_artifacts(
     for row in histories:
         seen.setdefault(str(source_to_local[int(row.user_idx)]), []).append(int(row.item_idx))
     (output / "seen_items.json").write_text(json.dumps(seen), encoding="utf-8")
+    if popularity_item_indices is not None:
+        if len(popularity_item_indices) != len(set(popularity_item_indices)) or any(
+            item < 0 or item >= model.num_items for item in popularity_item_indices
+        ):
+            raise ValueError("popularity fallback indices must be unique catalog indices")
+        (output / "popularity_item_indices.json").write_text(
+            json.dumps(popularity_item_indices), encoding="utf-8"
+        )
     metadata_path = output / "model_metadata.json"
     metadata_path.write_text(
         json.dumps(
@@ -95,7 +105,10 @@ def export_serving_artifacts(
         **lineage,
         "files": {},
     }
-    for name in ("best_model.pt", "item_vectors.npy", "item_ids.json", "user_ids.json", "seen_items.json", "model_metadata.json"):
+    artifact_names = ["best_model.pt", "item_vectors.npy", "item_ids.json", "user_ids.json", "seen_items.json", "model_metadata.json"]
+    if popularity_item_indices is not None:
+        artifact_names.append("popularity_item_indices.json")
+    for name in artifact_names:
         path = output / name
         if name == "best_model.pt" and not path.exists():
             import shutil
@@ -121,6 +134,11 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--candidate-items", type=Path, help="Optional shared-catalog JSON")
+    parser.add_argument(
+        "--mlflow-tracking-uri",
+        default=os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db"),
+        help="MLflow tracking URI (defaults to MLFLOW_TRACKING_URI or local SQLite)",
+    )
     args = parser.parse_args()
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("--output must be new or empty")
@@ -135,6 +153,7 @@ def main() -> None:
         "--data", str(args.data), "--output", str(args.output),
         "--max-users", str(args.max_users), "--max-train-pairs", str(args.max_train_pairs),
         "--epochs", str(args.epochs), "--seed", str(args.seed),
+        "--mlflow-tracking-uri", args.mlflow_tracking_uri,
     ]
     if args.user_ids_file:
         train_cmd.extend(["--user-ids-file", str(args.user_ids_file)])
@@ -144,10 +163,20 @@ def main() -> None:
         "--data", str(args.data), "--checkpoint", str(args.output / "best_model.pt"),
         "--output", str(args.output / "validation_metrics.json"),
         "--split", "validation", "--k", "10", "20",
+        "--mlflow-tracking-uri", args.mlflow_tracking_uri,
     ]
     if args.candidate_items:
         evaluate_cmd.extend(["--candidate-items", str(args.candidate_items)])
     _run(evaluate_cmd, env=run_env)
+    report = json.loads((args.output / "validation_metrics.json").read_text(encoding="utf-8"))
+    try:
+        gate = {"passed": True, **check_validation_gate(report)}
+    except ValueError as error:
+        gate = {"passed": False, "reason": str(error)}
+    serving_policy = "two_tower" if gate["passed"] else "popularity"
+    (args.output / "validation_gate.json").write_text(
+        json.dumps(gate, indent=2), encoding="utf-8"
+    )
     evaluation_run = json.loads(
         (args.output / "evaluation_mlflow_run.json").read_text(encoding="utf-8")
     )
@@ -167,19 +196,42 @@ def main() -> None:
         "evaluation_mlflow_run_id": evaluation_run["run_id"],
         "trained_at_utc": trained_at_utc,
         "seed": args.seed,
+        "serving_policy": serving_policy,
     }
+    from pyspark.sql import SparkSession
+
+    spark = (
+        SparkSession.builder.appName("recommender-export-popularity-fallback")
+        .master("local[*]")
+        .config("spark.ui.enabled", "false")
+        .getOrCreate()
+    )
+    try:
+        popularity_rows = (
+            spark.read.parquet(str(args.data / "train"))
+            .groupBy("item_idx")
+            .count()
+            .orderBy("count", "item_idx", ascending=[False, True])
+            .select("item_idx")
+            .collect()
+        )
+        popularity_indices = [int(row.item_idx) for row in popularity_rows]
+    finally:
+        spark.stop()
     bundle = export_serving_artifacts(
         args.data,
         args.output / "serving",
         args.output / "best_model.pt",
         lineage=lineage,
+        popularity_item_indices=popularity_indices,
     )
-    report = json.loads((args.output / "validation_metrics.json").read_text(encoding="utf-8"))
     manifest = {
         **lineage,
         "input_data": str(args.data),
         "users": report["users_evaluated"],
         "validation_metrics": report["metrics_at_k"],
+        "validation_gate": gate,
+        "serving_policy": serving_policy,
         "validation_report": str(args.output / "validation_metrics.json"),
         "serving_bundle": str(bundle),
     }

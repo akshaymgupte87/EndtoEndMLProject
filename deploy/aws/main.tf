@@ -16,6 +16,9 @@ data "aws_subnets" "default" {
 
 locals {
   name = var.project_name
+  bedrock_model_resources = var.bedrock_model_id == "" ? [] : [
+    "arn:aws:bedrock:${var.aws_region}::foundation-model/${var.bedrock_model_id}"
+  ]
 }
 
 resource "aws_security_group" "api" {
@@ -106,9 +109,82 @@ resource "aws_iam_role_policy" "read_model" {
   role = aws_iam_role.task.id
 
   policy = jsonencode({
-    Version   = "2012-10-17",
-    Statement = [{ Effect = "Allow", Action = ["s3:GetObject"], Resource = "${aws_s3_bucket.models.arn}/${var.model_bundle_key}" }]
+    Version = "2012-10-17",
+    Statement = concat(
+      [{ Effect = "Allow", Action = ["s3:GetObject"], Resource = "${aws_s3_bucket.models.arn}/${var.model_bundle_key}" }],
+      var.bedrock_model_id == "" ? [] : [{ Effect = "Allow", Action = ["bedrock:InvokeModel"], Resource = local.bedrock_model_resources }]
+    )
   })
+}
+
+resource "aws_iam_role" "mlflow_server" {
+  count = var.enable_sagemaker_mlflow ? 1 : 0
+
+  name = "${local.name}-mlflow-server"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Effect    = "Allow",
+      Principal = { Service = "sagemaker.amazonaws.com" },
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "mlflow_server" {
+  count = var.enable_sagemaker_mlflow ? 1 : 0
+
+  name = "${local.name}-mlflow-artifacts-and-registry"
+  role = aws_iam_role.mlflow_server[0].id
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect   = "Allow",
+        Action   = ["s3:GetBucketLocation"],
+        Resource = aws_s3_bucket.models.arn
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["s3:ListBucket"],
+        Resource = aws_s3_bucket.models.arn,
+        Condition = {
+          StringLike = { "s3:prefix" = ["mlflow", "mlflow/*"] }
+        }
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+        Resource = "${aws_s3_bucket.models.arn}/mlflow/*"
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "sagemaker:CreateModelPackageGroup",
+          "sagemaker:DescribeModelPackageGroup",
+          "sagemaker:CreateModelPackage",
+          "sagemaker:UpdateModelPackage",
+          "sagemaker:AddTags",
+          "sagemaker:CreateAction",
+          "sagemaker:AddAssociation"
+        ],
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_sagemaker_mlflow_tracking_server" "main" {
+  count = var.enable_sagemaker_mlflow ? 1 : 0
+
+  tracking_server_name         = "${local.name}-mlflow"
+  role_arn                     = aws_iam_role.mlflow_server[0].arn
+  artifact_store_uri           = "s3://${aws_s3_bucket.models.bucket}/mlflow"
+  mlflow_version               = "3.0.0"
+  tracking_server_size         = "Small"
+  automatic_model_registration = true
+
+  depends_on = [aws_iam_role_policy.mlflow_server]
 }
 
 resource "aws_ecs_cluster" "main" {
@@ -131,7 +207,9 @@ resource "aws_ecs_task_definition" "api" {
     portMappings = [{ containerPort = 8000, protocol = "tcp" }]
     environment = [
       { name = "MODEL_S3_BUCKET", value = aws_s3_bucket.models.bucket },
-      { name = "MODEL_S3_KEY", value = var.model_bundle_key }
+      { name = "MODEL_S3_KEY", value = var.model_bundle_key },
+      { name = "AWS_REGION", value = var.aws_region },
+      { name = "BEDROCK_MODEL_ID", value = var.bedrock_model_id }
     ]
     healthCheck = {
       command     = ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready')"]
@@ -155,7 +233,7 @@ resource "aws_ecs_service" "api" {
   name                              = local.name
   cluster                           = aws_ecs_cluster.main.id
   task_definition                   = aws_ecs_task_definition.api.arn
-  desired_count                     = 1
+  desired_count                     = var.deploy_service ? 1 : 0
   launch_type                       = "FARGATE"
   platform_version                  = "LATEST"
   health_check_grace_period_seconds = 180

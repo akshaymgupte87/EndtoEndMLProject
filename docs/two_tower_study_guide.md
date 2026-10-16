@@ -113,13 +113,73 @@ implemented feature.
 | Orchestration | **Airflow container and DAG discovery verified; training task not run.** DAG imports cleanly, but Windows denied WSL access during the task trigger. | [Airflow DAG](../deploy/airflow/dags/recommender_batch.py), [deployment record](deployment_walkthrough.md#airflow-and-kafka-demos) |
 | Streaming-event concepts | **One Kafka producer/consumer flow verified.** A click event was validated and consumed into retained JSON Lines for future offline training. | [Event schema](../src/events/schema.py), [producer](../src/events/produce_event.py), [consumer](../src/events/consume_events.py), [evidence](run_evidence/kafka_event_demo_2026-10-05.jsonl) |
 | Containerization / Kubernetes | **Docker/Compose verified locally; Kubernetes manifest not run.** The batch-exported bundle served through Compose; API health, requests, Redis cache/fallback/recovery, Prometheus scrape, and OpenTelemetry traces passed. The API image is about 1.57 GB. A local Kubernetes cluster has not been launched. | [End-to-end run](deployment_walkthrough.md#end-to-end-run-record-2026-10-05), [Dockerfile](../Dockerfile), [Compose](../compose.yaml), [Kubernetes manifest](../deploy/kubernetes/recommender.yaml) |
-| AWS / Terraform | **Terraform validates; AWS not applied.** ECS Fargate task, ECR, S3 model bucket, IAM, existing default-VPC networking, and CloudWatch are configured. | [Terraform](../deploy/aws/main.tf), [AWS runbook](aws_deployment_runbook.md) |
+| AWS / Terraform | **Deployment code prepared; AWS not applied.** Terraform can provision ECR, an encrypted private S3 model bucket, ECS/Fargate, IAM, and CloudWatch in an existing default VPC. The service can be held at zero tasks during bootstrap. | [Terraform](../deploy/aws/main.tf), [AWS runbook](aws_deployment_runbook.md) |
+| Amazon Bedrock | **Optional feature implemented; AWS not exercised.** `POST /explain/{user_idx}` sends the already selected item IDs to Bedrock Converse and returns generated explanatory text. The two-tower model still selects items. Terraform grants invocation permissions when `bedrock_model_id` is set. | [API route](../src/api/app.py), [IAM and task configuration](../deploy/aws/main.tf), [AWS deployment notes](../README.md#aws-deployment-ecs-s3-optional-bedrock) |
+| Amazon SageMaker | **Learning and migration option; not implemented in Terraform.** SageMaker could run managed data processing/training jobs, host MLflow, track/register models, or serve a custom inference endpoint. The current service loads its bundle from S3 and scores inside ECS, so SageMaker is not needed for this path. | [Deployment walkthrough](deployment_walkthrough.md#where-experiment-tracking-should-live), [AWS runbook](aws_deployment_runbook.md) |
 
 The code path now reaches a batch-exported model bundle and a locally tested
 recommendation API. Compose observability and Kafka were exercised; Airflow's
-training task, Kubernetes, and AWS still need runtime verification. See the
+training task, Kubernetes, and AWS still need runtime verification. Bedrock's
+route exists in code but needs an AWS account, model access, and runtime
+verification. See the
 [deployment walkthrough](deployment_walkthrough.md) and the verification
 statuses in [PLAN.md](../PLAN.md).
+
+## AWS, SageMaker, and Bedrock: how they fit
+
+The project has an AWS deployment path, but the pieces have different jobs:
+
+```text
+Local/SageMaker batch training → model_bundle.zip → private S3 bucket
+                                                    ↓
+Client → ECS/Fargate FastAPI → two-tower scores and filters seen items
+                         └── optional Bedrock Converse explanation text
+```
+
+**ECS/Fargate serves the current recommender.** The Docker image contains the
+FastAPI app and CPU PyTorch. At startup, the API uses the ECS task role to
+download `MODEL_S3_BUCKET` plus `MODEL_S3_KEY`, checks the bundle's SHA-256
+manifest, loads its checkpoint and precomputed item vectors, and serves
+`/recommendations/{user_idx}`. Keeping the scoring model and Bedrock separate
+helps explain that the recommender is a learned retrieval model; Bedrock adds
+language generation after item selection.
+
+**S3 carries the serving artifact.** The batch job writes a ZIP containing the
+checkpoint, item vectors, ID mappings, seen-item history, metadata, and file
+checksums. Upload it to the configured object key before ECS starts. The API
+task role can read that object. The bucket blocks public access and enables
+server-side encryption. The model bundle contains user/item identifiers and
+should be handled as application data with appropriate access controls.
+
+**Bedrock explains; it does not rank.** Set Terraform's `bedrock_model_id` to
+an enabled model ID in the selected region. The task role then receives
+Bedrock Runtime invocation permissions. Call `POST /explain/{user_idx}?limit=5`
+to get the same recommendations plus text generated from their item IDs. The
+current data bundle has item identifiers but no product titles or descriptions,
+so explanations are constrained and may be generic. Add trusted catalog
+metadata to the prompt only if better grounded explanations are needed. Check
+that the selected model supports Converse and that the account has model
+access. Calls incur model usage charges.
+
+**SageMaker is an optional managed ML lifecycle.** For learning, a SageMaker
+Processing job could run Spark data preparation, and a Training job could run
+the PyTorch training script with input/output paths in S3. The resulting
+checkpoint would still need the project's serving export step before ECS can
+load it. SageMaker Model Registry or managed MLflow can add managed lineage and
+approval workflows. A SageMaker real-time endpoint could host custom inference
+if endpoint scaling and managed model hosting become useful; then the API
+would call that endpoint instead of loading the checkpoint and vectors itself.
+These options require additional IAM, networking, container/runtime adaptation,
+and cost review. The current Terraform does not create SageMaker resources.
+
+For the concrete bootstrap, build, upload, and apply sequence, use the
+[AWS deployment runbook](aws_deployment_runbook.md). The first Terraform apply
+uses `deploy_service = false` to create infrastructure without starting a task
+that cannot yet find its image or model. After ECR has the image and S3 has the
+bundle, set `deploy_service = true` and apply again. Restrict `client_cidrs` to
+the intended caller range; the demo API has no application authentication.
+Treat successful Terraform formatting/validation as configuration checks only:
+they do not prove credentials, model access, startup, or AWS runtime behavior.
 
 ## Setup and first run
 

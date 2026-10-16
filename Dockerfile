@@ -5,7 +5,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir \
-    fastapi uvicorn numpy prometheus-client redis boto3 \
+    fastapi uvicorn 'numpy>=2,<3' prometheus-client redis boto3 \
     opentelemetry-api opentelemetry-sdk \
     opentelemetry-exporter-otlp-proto-http \
     opentelemetry-instrumentation-fastapi \

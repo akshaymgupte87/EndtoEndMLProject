@@ -54,7 +54,16 @@ def resolve_model_dir() -> Path:
 
 def load_runtime(model_dir: Path) -> dict:
     manifest = json.loads((model_dir / "manifest.json").read_text(encoding="utf-8"))
-    for filename, expected in manifest["files"].items():
+    required_files = {
+        "best_model.pt", "item_vectors.npy", "item_ids.json", "user_ids.json",
+        "seen_items.json", "model_metadata.json",
+    }
+    checksums = manifest.get("files")
+    if not isinstance(checksums, dict) or not required_files.issubset(checksums):
+        raise ValueError("model manifest is missing required serving artifact checksums")
+    for filename, expected in checksums.items():
+        if Path(filename).name != filename:
+            raise ValueError("model manifest may reference only top-level files")
         actual = hashlib.sha256((model_dir / filename).read_bytes()).hexdigest()
         if actual != expected:
             raise ValueError(f"serving artifact checksum mismatch: {filename}")
@@ -74,14 +83,27 @@ def load_runtime(model_dir: Path) -> dict:
         raise ValueError("serving item vectors/IDs do not match model dimensions")
     if len(user_ids) != model.num_users:
         raise ValueError("serving user IDs do not match model dimensions")
+    popularity_path = model_dir / "popularity_item_indices.json"
+    popularity = (
+        json.loads(popularity_path.read_text(encoding="utf-8"))
+        if popularity_path.is_file()
+        else []
+    )
+    if any(
+        isinstance(item, bool) or not isinstance(item, int) or item < 0 or item >= model.num_items
+        for item in popularity
+    ) or len(popularity) != len(set(popularity)):
+        raise ValueError("popularity fallback list contains invalid item indices")
     return {
         "model": model,
         "metadata": metadata,
         "serving_metadata": serving_metadata,
+        "serving_policy": serving_metadata.get("serving_policy", "two_tower"),
         "item_ids": item_ids,
         "user_to_local": {int(source): local for local, source in enumerate(user_ids)},
         "seen": {int(local): set(items) for local, items in seen.items()},
         "item_vectors": torch.from_numpy(np.asarray(vectors).copy()),
+        "popularity_item_indices": popularity,
         "cache": {},
         "redis": None,
     }
@@ -147,9 +169,22 @@ def create_app(model_dir: Path | None = None) -> FastAPI:
                 REQUESTS.labels(status="not_ready").inc()
                 raise HTTPException(status_code=503, detail="model is not loaded")
             local = runtime["user_to_local"].get(user_idx)
-            if local is None:
-                REQUESTS.labels(status="unknown_user").inc()
-                raise HTTPException(status_code=404, detail="user is not in the model vocabulary")
+            fallback = runtime["popularity_item_indices"]
+            if local is None or runtime["serving_policy"] == "popularity":
+                if not fallback:
+                    if local is None:
+                        REQUESTS.labels(status="unknown_user").inc()
+                        raise HTTPException(status_code=404, detail="user is not in the model vocabulary")
+                    REQUESTS.labels(status="no_fallback").inc()
+                    raise HTTPException(status_code=503, detail="popularity fallback is not available")
+                seen = runtime["seen"].get(local, set()) if local is not None else set()
+                items = [runtime["item_ids"][item] for item in fallback if item not in seen][:limit]
+                REQUESTS.labels(status="fallback").inc()
+                return {
+                    "user_idx": user_idx,
+                    "items": items,
+                    "model": "popularity_fallback",
+                }
             cache_key = (local, limit)
             redis_client = runtime.get("redis")
             redis_key = f"recommendations:{local}:{limit}"
@@ -189,6 +224,36 @@ def create_app(model_dir: Path | None = None) -> FastAPI:
                     CACHE_ERRORS.inc()
             REQUESTS.labels(status="ok").inc()
             return result
+
+    @app.post("/explain/{user_idx}")
+    def explain_recommendations(user_idx: int, limit: int = Query(default=5, ge=1, le=10)) -> dict:
+        """Explain recommendations with Bedrock when configured; recommendations remain model-backed."""
+        runtime = app.state.runtime
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="model is not loaded")
+        local = runtime["user_to_local"].get(user_idx)
+        if local is None:
+            raise HTTPException(status_code=404, detail="user is not in the model vocabulary")
+        try:
+            recommendation = recommend(user_idx, limit)
+            model_id = os.getenv("BEDROCK_MODEL_ID")
+            if not model_id:
+                raise HTTPException(status_code=503, detail="Bedrock explanations are not configured")
+            import boto3
+
+            client = boto3.client("bedrock-runtime", region_name=os.getenv("AWS_REGION"))
+            response = client.converse(
+                modelId=model_id,
+                system=[{"text": "Explain recommendations cautiously using only the provided item identifiers. Do not claim knowledge of user preferences."}],
+                messages=[{"role": "user", "content": [{"text": json.dumps({"items": recommendation["items"]})}]}],
+                inferenceConfig={"maxTokens": 180, "temperature": 0.2},
+            )
+            explanation = response["output"]["message"]["content"][0]["text"]
+            return {**recommendation, "explanation": explanation, "explanation_model": model_id}
+        except HTTPException:
+            raise
+        except Exception as error:
+            raise HTTPException(status_code=502, detail="Bedrock explanation request failed") from error
 
     @app.get("/metrics")
     def metrics() -> Response:

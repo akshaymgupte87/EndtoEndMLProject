@@ -22,6 +22,7 @@ with DAG(
             "export PATH={{ var.value.get('recommender_spark_home', '/opt/venv/lib/python3.11/site-packages/pyspark') }}/bin:{{ var.value.get('recommender_python_dir', '/opt/venv/bin') }}:{{ var.value.get('recommender_java_home', '/usr/lib/jvm/java-21-openjdk-amd64') }}/bin:$PATH && "
             "export PYSPARK_PYTHON={{ var.value.get('recommender_python', '/opt/venv/bin/python') }} && "
             "export PYTHONPATH={{ var.value.get('recommender_project_dir', '/opt/recommender') }} && "
+            "export MLFLOW_TRACKING_URI={{ var.value.get('recommender_mlflow_tracking_uri', 'sqlite:////opt/recommender/artifacts/airflow_runs/mlflow.db') }} && "
             "export PYSPARK_SUBMIT_ARGS='--driver-memory {{ var.value.get('recommender_spark_driver_memory', '8g') }} pyspark-shell' && "
             "cd {{ var.value.get('recommender_project_dir', '/opt/recommender') }} && "
             "{{ var.value.get('recommender_python', '/opt/venv/bin/python') }} -m src.pipeline.batch_job "

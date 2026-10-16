@@ -27,3 +27,30 @@ variable "client_cidrs" {
     error_message = "Supply at least one valid IPv4 CIDR; use your own public IP /32 and do not allow 0.0.0.0/0."
   }
 }
+
+variable "bedrock_model_id" {
+  type        = string
+  default     = ""
+  description = "Optional regional Bedrock foundation model ID for POST /explain/{user_idx}; empty disables explanations."
+  validation {
+    condition = var.bedrock_model_id == "" || (
+      !startswith(var.bedrock_model_id, "arn:") &&
+      !startswith(var.bedrock_model_id, "us.") &&
+      !startswith(var.bedrock_model_id, "eu.") &&
+      !startswith(var.bedrock_model_id, "global.")
+    )
+    error_message = "Supply a regional foundation model ID (for example amazon.nova-micro-v1:0), not a model ARN or cross-region inference-profile ID."
+  }
+}
+
+variable "enable_sagemaker_mlflow" {
+  type        = bool
+  default     = false
+  description = "Create a small SageMaker-managed MLflow tracking server with automatic Model Registry synchronization. This is billable while running."
+}
+
+variable "deploy_service" {
+  type        = bool
+  default     = true
+  description = "Set false for the initial infrastructure apply before the image and model bundle are uploaded."
+}

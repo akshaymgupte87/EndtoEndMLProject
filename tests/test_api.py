@@ -16,7 +16,7 @@ from src.models.train_two_tower import TrainingConfig, _save_checkpoint
 from src.models.two_tower import TwoTowerRecommender
 
 
-async def _request(app, path: str) -> tuple[int, bytes]:
+async def _request(app, path: str, method: str = "GET") -> tuple[int, bytes]:
     """Send one small HTTP request directly through the ASGI application."""
     status_code = 500
     body = bytearray()
@@ -34,7 +34,7 @@ async def _request(app, path: str) -> tuple[int, bytes]:
     parsed = urlsplit(path)
     scope = {
         "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
-        "method": "GET", "scheme": "http", "path": parsed.path, "raw_path": parsed.path.encode(),
+        "method": method, "scheme": "http", "path": parsed.path, "raw_path": parsed.path.encode(),
         "query_string": parsed.query.encode(), "root_path": "", "headers": [],
         "client": ("127.0.0.1", 12345), "server": ("testserver", 80),
     }
@@ -97,7 +97,8 @@ def test_api_serves_known_user_hides_seen_and_rejects_unknown(model_bundle) -> N
             status, body = await _request(app, "/recommendations/77?limit=2")
             assert status == 200
             assert json.loads(body)["items"] == ["item-b", "item-c"]
-            assert (await _request(app, "/recommendations/999"))[0] == 404
+            status, body = await _request(app, "/recommendations/999")
+            assert status == 404
             assert (await _request(app, "/recommendations/77?limit=101"))[0] == 422
             status, body = await _request(app, "/metrics")
             assert status == 200 and b"recommendation_requests_total" in body
@@ -152,3 +153,95 @@ def test_api_configures_short_redis_connect_and_read_timeouts(
     assert options["socket_connect_timeout"] == 0.2
     assert options["socket_timeout"] == 0.2
     assert options["retry_on_timeout"] is False
+
+
+def test_api_uses_popularity_for_unknown_user_when_bundle_has_fallback(model_bundle) -> None:
+    (model_bundle / "popularity_item_indices.json").write_text(json.dumps([2, 1, 0]))
+    manifest = json.loads((model_bundle / "manifest.json").read_text())
+    manifest["files"]["popularity_item_indices.json"] = hashlib.sha256(
+        (model_bundle / "popularity_item_indices.json").read_bytes()
+    ).hexdigest()
+    (model_bundle / "manifest.json").write_text(json.dumps(manifest))
+    app = create_app(model_bundle)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            status, body = await _request(app, "/recommendations/999?limit=2")
+            assert status == 200
+            assert json.loads(body) == {
+                "user_idx": 999,
+                "items": ["item-c", "item-b"],
+                "model": "popularity_fallback",
+            }
+
+    asyncio.run(run())
+
+
+def test_api_uses_popularity_policy_for_known_user_and_filters_seen(model_bundle):
+    metadata_path = model_bundle / "model_metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["serving_policy"] = "popularity"
+    metadata_path.write_text(json.dumps(metadata))
+    (model_bundle / "popularity_item_indices.json").write_text(json.dumps([0, 2, 1]))
+    manifest = json.loads((model_bundle / "manifest.json").read_text())
+    manifest["files"]["model_metadata.json"] = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+    manifest["files"]["popularity_item_indices.json"] = hashlib.sha256(
+        (model_bundle / "popularity_item_indices.json").read_bytes()
+    ).hexdigest()
+    (model_bundle / "manifest.json").write_text(json.dumps(manifest))
+    app = create_app(model_bundle)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            status, body = await _request(app, "/recommendations/77?limit=2")
+            assert status == 200
+            assert json.loads(body)["items"] == ["item-c", "item-b"]
+            assert json.loads(body)["model"] == "popularity_fallback"
+
+    asyncio.run(run())
+
+
+def test_api_rejects_manifest_missing_required_checksum(model_bundle):
+    (model_bundle / "manifest.json").write_text(json.dumps({"files": {}}))
+    with pytest.raises(ValueError, match="missing required"):
+        from src.api.app import load_runtime
+
+        load_runtime(model_bundle)
+
+
+def test_bedrock_explanation_uses_selected_recommendations(model_bundle, monkeypatch):
+    calls = {}
+
+    class FakeBedrockRuntime:
+        def converse(self, **kwargs):
+            calls.update(kwargs)
+            return {"output": {"message": {"content": [{"text": "These are ranked suggestions."}]}}}
+
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "amazon.nova-micro-v1:0")
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    monkeypatch.setitem(
+        sys.modules,
+        "boto3",
+        SimpleNamespace(
+            client=lambda service, region_name: (
+                FakeBedrockRuntime()
+                if service == "bedrock-runtime" and region_name == "us-west-2"
+                else pytest.fail("unexpected Bedrock client configuration")
+            )
+        ),
+    )
+    app = create_app(model_bundle)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            status, body = await _request(app, "/explain/77?limit=2", method="POST")
+            assert status == 200
+            result = json.loads(body)
+            assert result["items"] == ["item-b", "item-c"]
+            assert result["explanation"] == "These are ranked suggestions."
+            assert result["explanation_model"] == "amazon.nova-micro-v1:0"
+
+    asyncio.run(run())
+    assert calls["messages"][0]["content"][0]["text"] == json.dumps(
+        {"items": ["item-b", "item-c"]}
+    )

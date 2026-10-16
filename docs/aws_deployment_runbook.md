@@ -6,8 +6,9 @@ small: ECS, ECR, S3, IAM, and CloudWatch. It uses the account's existing default
 VPC; Terraform does not create a VPC, load balancer, DNS records, or TLS
 certificate. The task is reachable directly at its public IP over HTTP on
 port 8000. Use only non-sensitive demo data. AWS resources are billable; review
-the Terraform plan and a separate estimate before applying. No AWS resources
-have been created as part of writing this guide.
+the Terraform plan and a separate estimate before applying. The foundational
+stack is now applied for this project; the ECS service remains at zero tasks
+until the validated model bundle and immutable API image are available.
 
 ## What the current AWS path does
 
@@ -15,6 +16,12 @@ This is the deployment contract for this repository. You train in WSL, build
 the API image from the repository root, and deploy only the API to ECS. The
 Spark batch job is **not** deployed by the current Terraform. You upload its
 serving bundle to S3 yourself before starting ECS.
+
+The optional SageMaker MLflow/Model Registry and Bedrock explanation path is
+now implemented in Terraform and the end-to-end notebook. See the concise
+[AWS MLflow and Bedrock guide](aws_mlflow_bedrock.md) before enabling it. The
+tracking server is off by default; this runbook's later manual MLflow steps are
+an alternative setup, so do not create a second tracking server.
 
 ```text
 Local/WSL batch training and validation → S3 model bundle
@@ -47,13 +54,15 @@ HTTP client package:
 .\venv\Scripts\python.exe -m pytest tests/test_api.py -q
 ```
 
-Result (2026-10-05): **2 passed**. The tests cover API health/readiness,
-known/unknown users, limits, metrics, and Redis-outage fallback; the ASGI test
-helper avoids adding an HTTP client dependency.
+Result (2026-10-15): **7 passed**. The tests cover API health/readiness,
+known/unknown users, limits, metrics, Redis-outage fallback, and a mocked
+Bedrock explanation call; the ASGI test helper avoids adding an HTTP client
+dependency.
 
-The current AWS Terraform does **not** deploy Prometheus, Grafana, an
+The default AWS Terraform does **not** deploy Prometheus, Grafana, an
 OpenTelemetry Collector, X-Ray tracing, a Redis cache, or a SageMaker MLflow
-server. ECS task logs go to CloudWatch Logs, and ECS publishes service
+server. An opt-in SageMaker MLflow server is available through
+`enable_sagemaker_mlflow`; it is not yet enabled in AWS. ECS task logs go to CloudWatch Logs, and ECS publishes service
 metrics to CloudWatch Metrics. The API's Prometheus-format `/metrics` endpoint
 is available in the container, but AWS does not scrape it in the current
 configuration. Do not say application metrics or distributed traces are
@@ -178,7 +187,6 @@ existing bounded training and evaluation commands with the ARN as their
 tracking URI:
 
 ```bash
-uv add --optional sagemaker-mlflow sagemaker-mlflow
 uv sync --extra sagemaker-mlflow
 export RECOMMENDER_MLFLOW_TRACKING_URI='PASTE_THE_TRACKING_SERVER_ARN_HERE'
 export AWS_PROFILE=recommender-dev
@@ -204,8 +212,8 @@ metrics, and artifacts. Download `history.json`, the checkpoint, and the
 validation report; compare file hashes and numeric values with the local
 files. The managed run is a pass only if both runs exist and their inputs,
 metrics, and files agree with the local execution. After selecting a tracking
-server version, pin compatible MLflow/plugin versions in the optional
-dependency group and lock them so later runs do not silently change clients.
+server version, use the pinned optional dependency group and lock file so later
+runs do not silently change clients.
 
 If registration is enabled, test the gate on a validation report and confirm
 the registered version and `candidate` alias in the managed UI. Keep the local

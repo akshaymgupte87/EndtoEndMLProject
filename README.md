@@ -1,16 +1,35 @@
 # Product Recommendation Service
 
-This project builds a recommendation system from historical product
-interactions and serves recommendations through an HTTP API. The pipeline
-uses PySpark for data preparation and baselines, PyTorch for two-tower
-retrieval, and FastAPI for serving. Redis can cache responses; Docker Compose
-includes local Prometheus metrics and OpenTelemetry request tracing.
+This repository is a production-oriented portfolio project for an end-to-end
+product recommender. It currently contains Spark data preparation, offline
+model experiments, batch artifact packaging, a FastAPI service, local
+observability, and deployment examples. The next goal is to demonstrate the
+controls and operational evidence that make an ML service safe to reproduce,
+release, monitor, and roll back.
 
-The repository also contains a bounded Pandas/XGBoost ranking experiment, a
-Kafka event example, an Airflow batch DAG, a Kubernetes manifest, and a small
-Terraform path for deploying the API to AWS ECS/Fargate. These are learning
-and demonstration components; the system has not been deployed to AWS or
-validated at production scale.
+It is **not production-ready today**. Model quality is weak and inconsistent
+across runs, training is bounded/local, the public API contract still uses an
+internal user index, authentication is not implemented, and AWS has not been
+deployed. Treat Compose, Kubernetes, Airflow, Kafka, and Terraform as portfolio
+components with the level of verification recorded in [the project plan](PLAN.md),
+not as proof of a production service.
+
+The first priority is a trustworthy evaluation result. A matched offline
+comparison showed a small two-tower gain over popularity, while a later smoke
+run scored zero recall for two-tower. The sampled XGBoost result uses a
+different candidate protocol and should not be compared directly with
+full-catalog metrics. Results and caveats are in the
+[test report](docs/two_tower_test_report.md).
+
+## Project status and roadmap
+
+[PLAN.md](PLAN.md) defines the production portfolio goal, current evidence,
+phase-by-phase exit criteria, and immediate priority order. The work is
+organized around reproducible ML evidence, safe serving, CI and release
+rollback, measurable service objectives, and one bounded cloud deployment.
+The project is complete as a portfolio when a reviewer can trace and reproduce
+the full path from versioned data through a gated model release to monitored
+serving and tested rollback.
 
 ## Results
 
@@ -33,14 +52,19 @@ there has been no online A/B test. The model also has weak rare-item coverage.
 Historical interactions → PySpark preparation and time-based splits
   → popularity / implicit ALS / two-tower experiments
   → validation and cohort evaluation → batch-exported serving bundle
-  → FastAPI recommendation endpoint → optional Redis cache
+  → S3 serving bundle → FastAPI recommendation endpoint → optional Redis cache
+                                      ↘ optional Bedrock explanation
 ```
 
-The API serves two-tower recommendations, filters items already seen by the
-user, and exposes health, readiness, model information, and Prometheus metrics
-endpoints. Prometheus and OpenTelemetry are configured for local Compose
-observability. XGBoost is an offline ranking experiment and is not used by the
-serving API.
+The API serves two-tower recommendations only when its validation report
+passes the quality gate; otherwise the batch bundle selects the popularity
+baseline. Unknown users also receive popularity results when that fallback is
+packaged. The API filters training-seen items for known users and exposes
+health, readiness, model information, and Prometheus metrics endpoints.
+Prometheus and OpenTelemetry are configured for local Compose
+observability. On AWS, ECS loads the model bundle from S3 using its task role.
+The optional Bedrock explanation route uses the Bedrock Runtime Converse API.
+XGBoost is an offline ranking experiment and is not used by the serving API.
 
 ## Setup
 
@@ -116,6 +140,50 @@ The recommendation endpoint is `/recommendations/{user_idx}?limit=10`; use a
 user index present in `artifacts/batch_smoke/serving/user_ids.json`. Open
 Prometheus at `http://localhost:9090` to inspect API metrics. Stop the local
 services with `docker compose down`.
+
+## AWS deployment (ECS, S3, optional Bedrock)
+
+For the current guided deployment checkpoint and copy-ready commands, see the
+[AWS deployment quick start](docs/aws_deployment_quickstart.md). The longer
+[AWS deployment runbook](docs/aws_deployment_runbook.md) covers validation,
+monitoring, costs, and cleanup. Optional SageMaker MLflow experiment tracking,
+SageMaker Model Registry synchronization, and Bedrock explanations are covered
+in the [AWS MLflow and Bedrock guide](docs/aws_mlflow_bedrock.md).
+
+The Terraform in `deploy/aws` provisions an ECR repository, encrypted private
+S3 model bucket, ECS/Fargate API, CloudWatch logs/alarms/dashboard, and a
+task role scoped to the model bundle. It expects an existing default VPC with
+public subnets and an immutable image already pushed to ECR. Choose a narrow
+client CIDR such as your public IP with `/32`; the API currently has no
+authentication, so do not expose it broadly.
+
+The AWS foundation is already applied with `deploy_service = false`; it has no
+running API task. Run the end-to-end notebook in its documented Spark
+environment, use its printed bundle path only if the validation gate passes,
+push the API image to ECR, and then follow the [AWS deployment quick start](docs/aws_deployment_quickstart.md)
+to upload the bundle and start ECS. Do not use the undertrained Airflow smoke
+bundle as a production candidate.
+
+For Bedrock explanations, confirm model availability and account permissions,
+set `bedrock_model_id` to a supported regional model ID, and apply. The optional
+`POST /explain/{user_idx}?limit=5` route adds cautious text to the selected
+recommendations; Bedrock does not choose or reorder items. The ECS task role
+gets invocation access only for the configured model. See the
+[AWS MLflow and Bedrock guide](docs/aws_mlflow_bedrock.md) for setup and request
+examples.
+
+SageMaker is best used for managed custom-model training, processing jobs,
+model registry, and hosted inference endpoints. The current two-tower model is
+already served efficiently inside this API from a versioned S3 bundle, so a
+SageMaker endpoint is optional and would add ongoing endpoint cost. The
+training scripts can be adapted into SageMaker processing/training jobs after
+data is staged in S3, with approved artifacts promoted back to the serving
+bundle format. SageMaker real-time endpoints could replace in-process serving
+if custom inference scaling or hosting is needed. By default, Terraform does
+not create SageMaker resources. An opt-in small managed MLflow server can track
+the notebook's local/WSL training and synchronize gated models to SageMaker
+Model Registry; SageMaker Training Jobs and real-time endpoints remain separate
+future options. Review the optional guide and current costs before enabling it.
 
 Run the test suite in the configured Linux/WSL environment:
 

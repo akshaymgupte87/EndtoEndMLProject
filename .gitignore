@@ -33,6 +33,8 @@ metastore_db/
 .env.*
 !.env.example
 .aws/
+deploy/aws/terraform.tfvars
+deploy/aws/terraform.tfvars.json
 .terraform/
 *.tfstate
 *.tfstate.*

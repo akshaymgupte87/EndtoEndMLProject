@@ -26,6 +26,20 @@ output "api_port" {
   value = 8000
 }
 
+output "model_upload_command" {
+  value = "aws s3 cp <model_bundle.zip> s3://${aws_s3_bucket.models.bucket}/${var.model_bundle_key}"
+}
+
 output "cloudwatch_dashboard_name" {
   value = aws_cloudwatch_dashboard.api.dashboard_name
+}
+
+output "sagemaker_mlflow_arn" {
+  value       = var.enable_sagemaker_mlflow ? aws_sagemaker_mlflow_tracking_server.main[0].arn : null
+  description = "ARN for the optional SageMaker-managed MLflow tracking server."
+}
+
+output "sagemaker_mlflow_url" {
+  value       = var.enable_sagemaker_mlflow ? aws_sagemaker_mlflow_tracking_server.main[0].tracking_server_url : null
+  description = "MLflow UI URL for the optional SageMaker-managed tracking server."
 }
