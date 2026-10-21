@@ -38,7 +38,7 @@ is still configured for zero running tasks.
   tracking/Model Registry synchronization and Bedrock explanations. Neither
   integration has been enabled or exercised in AWS yet.
 
-See [the test report](docs/two_tower_test_report.md), [deployment walkthrough](docs/deployment_walkthrough.md), and [AWS runbook](docs/aws_deployment_runbook.md) for dated details. Some older sections still describe Airflow and Kubernetes as unverified; treat the dated October 14, 2026 entries in this file as newer evidence and reconcile those historical notes as a documentation task.
+See [the test report](docs/research/two_tower_test_report.md), [deployment walkthrough](docs/guides/deployment_walkthrough.md), and [AWS runbook](docs/guides/aws_deployment_runbook.md) for dated details. Some older sections still describe Airflow and Kubernetes as unverified; treat the dated October 14, 2026 entries in this file as newer evidence and reconcile those historical notes as a documentation task.
 
 ## Focused delivery scope
 

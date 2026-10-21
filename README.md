@@ -1,5 +1,56 @@
 # Product Recommendation Service
 
+> **Portfolio summary:** I built a learning-sized recommendation system for
+> ranking products from historical interaction data. My work spans Spark data
+> preparation and temporal splits, popularity/ALS/two-tower experiments,
+> validation-gated batch packaging, and a FastAPI serving path with optional
+> Redis and local observability. Core technologies: Python, PySpark, PyTorch,
+> FastAPI, MLflow, Docker Compose, Prometheus, and OpenTelemetry. The hardest
+> engineering decision was keeping evaluation comparable and leakage-aware:
+> training-only ID maps, shared candidates, and an explicit baseline gate.
+> [Interview story](docs/guides/project_interview_story.md) ·
+> [Study guide](docs/guides/two_tower_study_guide.md)
+
+## What I built
+
+I implemented the data and model workflow in [`src/models`](src/models),
+including deterministic training-only ID mappings, negative sampling,
+two-tower training/evaluation, baseline comparisons, and serving-bundle
+creation. I also built the API and batch path in [`src/api`](src/api) and
+[`src/pipeline`](src/pipeline), plus tests and local observability. Course-
+derived and inherited material is identified in the relevant guides; this
+summary describes my engineering contributions and does not claim ownership of
+the underlying Amazon dataset or third-party frameworks.
+
+## Evaluation
+
+The source is the public Amazon Reviews 2023 Movies and TV category; it is not
+included in Git. The matched experiment uses a fixed 10,000-user cohort, 110,923
+training interactions, 10,000 validation targets, and a 50,507-item candidate
+catalog (three seeds). On validation, two-tower averaged Recall@10 2.21% and
+NDCG@10 0.011180; popularity averaged 2.09% and 0.010294. These are
+independent validation labels, not a final unbiased test estimate. A later
+frozen-candidate test evaluation had 9,934 eligible targets, with Recall@10
+1.490% / NDCG@10 0.007616 for two-tower and 1.399% / 0.007134 for popularity;
+however, earlier validation experiments informed the iteration, so this test
+is a project checkpoint rather than an untouched estimate. Absolute recall is
+low, tail-item results are weak, and no online business impact has been
+measured. Details and limitations: [evaluation report](docs/research/two_tower_test_report.md).
+
+## First run: synthetic demo
+
+This small deterministic example needs Python 3.11+ and PyTorch, but no Spark,
+dataset download, credentials, or generated assets. Install the project and run:
+
+```bash
+python -m pip install -e .
+python -m src.models.demo_two_tower
+```
+
+It prints recommendations for four toy users. This verifies the local model
+mechanics only; its synthetic pairs and sampled loss are not quality evidence.
+For a real-data workflow, use the setup and dataset instructions below.
+
 This repository is a production-oriented portfolio project for an end-to-end
 product recommender. It currently contains Spark data preparation, offline
 model experiments, batch artifact packaging, a FastAPI service, local
@@ -19,7 +70,7 @@ comparison showed a small two-tower gain over popularity, while a later smoke
 run scored zero recall for two-tower. The sampled XGBoost result uses a
 different candidate protocol and should not be compared directly with
 full-catalog metrics. Results and caveats are in the
-[test report](docs/two_tower_test_report.md).
+[test report](docs/research/two_tower_test_report.md).
 
 ## Project status and roadmap
 
@@ -31,7 +82,7 @@ The project is complete as a portfolio when a reviewer can trace and reproduce
 the full path from versioned data through a gated model release to monitored
 serving and tested rollback.
 
-## Results
+## Validation results
 
 On a shared offline validation cohort of 10,000 users and a 50,507-item
 candidate catalog, the mean results across three seeds were:
@@ -144,13 +195,13 @@ services with `docker compose down`.
 ## AWS deployment (ECS, S3, optional Bedrock)
 
 For the current guided deployment checkpoint and copy-ready commands, see the
-[AWS deployment quick start](docs/aws_deployment_quickstart.md). The longer
-[AWS deployment runbook](docs/aws_deployment_runbook.md) covers validation,
+[AWS deployment quick start](docs/guides/aws_deployment_quickstart.md). The longer
+[AWS deployment runbook](docs/guides/aws_deployment_runbook.md) covers validation,
 monitoring, costs, and cleanup. Optional SageMaker MLflow experiment tracking,
 SageMaker Model Registry synchronization, and Bedrock explanations are covered
-in the [AWS MLflow and Bedrock guide](docs/aws_mlflow_bedrock.md).
+in the [AWS MLflow and Bedrock guide](docs/guides/aws_mlflow_bedrock.md).
 The SageMaker training-to-ECS deployment workflow is described in the
-[AWS cloud ML pipeline guide](docs/aws_cloud_ml_pipeline.md).
+[AWS cloud ML pipeline guide](docs/guides/aws_cloud_ml_pipeline.md).
 
 The Terraform in `deploy/aws` provisions an ECR repository, encrypted private
 S3 model bucket, ECS/Fargate API, CloudWatch logs/alarms/dashboard, and a
@@ -162,7 +213,7 @@ authentication, so do not expose it broadly.
 The AWS foundation is already applied with `deploy_service = false`; it has no
 running API task. Run the end-to-end notebook in its documented Spark
 environment, use its printed bundle path only if the validation gate passes,
-push the API image to ECR, and then follow the [AWS deployment quick start](docs/aws_deployment_quickstart.md)
+push the API image to ECR, and then follow the [AWS deployment quick start](docs/guides/aws_deployment_quickstart.md)
 to upload the bundle and start ECS. Do not use the undertrained Airflow smoke
 bundle as a production candidate.
 
@@ -171,7 +222,7 @@ set `bedrock_model_id` to a supported regional model ID, and apply. The optional
 `POST /explain/{user_idx}?limit=5` route adds cautious text to the selected
 recommendations; Bedrock does not choose or reorder items. The ECS task role
 gets invocation access only for the configured model. See the
-[AWS MLflow and Bedrock guide](docs/aws_mlflow_bedrock.md) for setup and request
+[AWS MLflow and Bedrock guide](docs/guides/aws_mlflow_bedrock.md) for setup and request
 examples.
 
 The SageMaker pipeline runs the batch training and validation workflow as a
@@ -180,7 +231,7 @@ resulting gated bundle to the API's S3 key and refreshes the ECS/Fargate
 FastAPI service. The API continues to serve recommendations from that bundle;
 a SageMaker inference endpoint is not required. The pipeline infrastructure
 and images are created only after applying the Terraform setup in the
-[cloud ML pipeline guide](docs/aws_cloud_ml_pipeline.md). An opt-in managed
+[cloud ML pipeline guide](docs/guides/aws_cloud_ml_pipeline.md). An opt-in managed
 MLflow server can separately track experiments and synchronize model registry
 entries. Review the guide and current AWS costs before running cloud jobs.
 
