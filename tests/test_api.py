@@ -177,6 +177,80 @@ def test_api_uses_popularity_for_unknown_user_when_bundle_has_fallback(model_bun
     asyncio.run(run())
 
 
+def test_api_rejects_non_integer_external_user_ids(model_bundle) -> None:
+    """The current contract is an integer model index, not a stable external ID."""
+    app = create_app(model_bundle)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            status, body = await _request(app, "/recommendations/customer-77")
+            assert status == 422
+            assert b"Input should be a valid integer" in body
+
+    asyncio.run(run())
+
+
+def test_api_rejects_limits_above_service_cap(model_bundle) -> None:
+    app = create_app(model_bundle)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            status, _ = await _request(app, "/recommendations/77?limit=101")
+            assert status == 422
+            status, body = await _request(app, "/recommendations/77?limit=100")
+            assert status == 200
+            assert len(json.loads(body)["items"]) <= 100
+
+    asyncio.run(run())
+
+
+def test_api_returns_bounded_empty_list_when_user_has_seen_catalog(model_bundle) -> None:
+    """Sparse or exhausted histories must not leak seen items or overrun the catalog."""
+    seen_path = model_bundle / "seen_items.json"
+    seen_path.write_text(json.dumps({"0": [0, 1, 2], "1": [2]}))
+    manifest = json.loads((model_bundle / "manifest.json").read_text())
+    manifest["files"]["seen_items.json"] = hashlib.sha256(seen_path.read_bytes()).hexdigest()
+    (model_bundle / "manifest.json").write_text(json.dumps(manifest))
+    app = create_app(model_bundle)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            status, body = await _request(app, "/recommendations/77?limit=100")
+            assert status == 200
+            assert json.loads(body)["items"] == []
+
+    asyncio.run(run())
+
+
+def test_api_is_not_ready_when_model_bundle_cannot_be_loaded(tmp_path) -> None:
+    app = create_app(tmp_path / "missing-model")
+
+    async def run():
+        with pytest.raises(FileNotFoundError):
+            async with app.router.lifespan_context(app):
+                pass
+        status, body = await _request(app, "/ready")
+        assert status == 503
+        assert json.loads(body)["detail"] == "model is not loaded"
+
+    asyncio.run(run())
+
+
+def test_api_recommends_deterministically_on_toy_fixture(model_bundle) -> None:
+    """A fixed fixture is a mechanics check, never evidence of user relevance."""
+    app = create_app(model_bundle)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            first = await _request(app, "/recommendations/77?limit=2")
+            second = await _request(app, "/recommendations/77?limit=2")
+            assert first[0] == second[0] == 200
+            assert json.loads(first[1])["items"] == json.loads(second[1])["items"]
+            assert json.loads(first[1])["items"] == ["item-b", "item-c"]
+
+    asyncio.run(run())
+
+
 def test_api_uses_popularity_policy_for_known_user_and_filters_seen(model_bundle):
     metadata_path = model_bundle / "model_metadata.json"
     metadata = json.loads(metadata_path.read_text())
