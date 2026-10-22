@@ -39,17 +39,66 @@ measured. Details and limitations: [evaluation report](docs/research/two_tower_t
 
 ## First run: synthetic demo
 
-This small deterministic example needs Python 3.11+ and PyTorch, but no Spark,
-dataset download, credentials, or generated assets. Install the project and run:
+The interactive demo is an inspectable offline ranking experiment, not a list of
+hard-coded recommendations. With Python 3.11+ and the project dependencies
+installed, run:
 
 ```bash
 python -m pip install -e .
-python -m src.models.demo_two_tower
+python demo.py
 ```
 
-It prints recommendations for four toy users. This verifies the local model
-mechanics only; its synthetic pairs and sampled loss are not quality evidence.
-For a real-data workflow, use the setup and dataset instructions below.
+The **Project overview** tab explains the service and summarizes the saved
+real-data evaluation in plain language and a proportional comparison chart. The current project checkpoint records
+two-tower Recall@10 1.490% / NDCG@10 0.007616 versus popularity Recall@10
+1.399% / NDCG@10 0.007134, measured over 9,934 users and a 50,507-item shared
+candidate catalog. This is a small offline gain: the overview says so plainly
+and notes that no online business impact has been measured. Expand the metric
+details to see exact definitions and the training curve. The page also gives
+concrete next steps: inspect weak performance on less popular movies, tune a
+stronger baseline, and evaluate with a time-based split. The report and
+checkpoint are stored project artifacts, not recomputed when the page opens.
+If artifacts are absent, that panel says the saved report is unavailable.
+
+The seeded synthetic cohort has 96 users and 40 movie IDs. Each user's six
+training interactions fit an ID-embedding two-tower model with pairwise BPR
+loss; a separate validation interaction selects the checkpoint. The page
+compares full-catalog Recall@10 and NDCG@10 against a popularity ranker computed
+only from training interactions, using one held-out test item per user. It also
+shows the selected user's training history, live API recommendations, dot
+product scores, and descriptive same-cohort interaction support. Test targets
+are excluded from training and checkpoint selection.
+
+The generator intentionally creates four balanced genre cohorts, each with a
+ten-title catalog, so users sharing a cohort provide a learnable collaborative
+signal. High scores on this controlled dataset demonstrate the training and
+evaluation path; they do not establish performance on real audiences.
+
+The page separates the project overview, an example user trace, and technical
+details into tabs. The example user trace shows its training history, live
+recommendations, and the held-out item's rank under both approaches. In
+**Technical details**, the **Run experiment** button performs a new server-side
+training and evaluation run. Change the seed to change the generated
+interaction split, then inspect the measured runtime, epoch loss chart and log,
+run report, downloadable split CSV, model checkpoint, and artifact manifest.
+The tab clearly distinguishes this live synthetic retraining from the saved
+real-data evaluation, and groups the downloads under **Download run artifacts**.
+The report includes the run ID, training configuration, best validation
+epoch/loss, split fingerprint, and checkpoint SHA-256. The live recommendation
+API switches to the new checkpoint only after the serving bundle passes its
+checksum validation. It is expected to finish quickly because the example has
+only 576 training pairs; the page reports the measured run time and does not
+add an artificial delay.
+
+All generated model files live in a temporary directory and are removed when
+the server exits. The experiment is synthetic and demonstrates the workflow,
+evaluation protocol, and serving path; its metrics are not evidence of
+real-world recommendation quality. The demo does not require the Amazon
+dataset, Java, a running Spark service, AWS credentials, or Docker. If the
+browser does not open automatically, use `http://127.0.0.1:8766`; port 8766
+must be available. The API also exposes `/health`, `/ready`, `/model-info`,
+`/recommendations/{user_idx}`, and `/metrics`. Press Ctrl+C to stop. For the
+real-data workflow, use the setup and dataset instructions below.
 
 This repository is a production-oriented portfolio project for an end-to-end
 product recommender. It currently contains Spark data preparation, offline
@@ -235,8 +284,35 @@ and images are created only after applying the Terraform setup in the
 MLflow server can separately track experiments and synchronize model registry
 entries. Review the guide and current AWS costs before running cloud jobs.
 
-Run the test suite in the configured Linux/WSL environment:
+On Windows, run the Spark tests inside the configured WSL Ubuntu environment.
+This avoids starting Spark with the Windows Python/Java installation. The
+launcher selects the Python 3.11, PySpark, and Java 21 paths documented below,
+then runs the complete suite without skipping tests:
+
+```powershell
+.\scripts\test-wsl.ps1 -q
+```
+
+Pass normal pytest options or test paths after the script name, for example
+`.\scripts\test-wsl.ps1 tests/test_prepare.py -q`. The launcher expects
+`/home/akshay/miniconda3/bin/python`, PySpark beneath that environment, and
+Java 21 at `/usr/lib/jvm/java-21-openjdk-amd64`. If your WSL paths differ,
+adjust the constants near the top of `scripts/test-wsl.ps1`.
+
+From a Linux or WSL shell, activate the environment described above and use
+the portable launcher instead:
 
 ```bash
-python -m pytest -q
+./scripts/test-linux.sh -q
 ```
+
+The Linux launcher uses `PYSPARK_PYTHON` when set, otherwise `python3` (then
+`python`). It checks that the selected interpreter is Python 3.11+ with
+PySpark 4.x, locates Java from `JAVA_HOME` or `PATH`, requires Java 17+
+(Java 21 is the tested version), and verifies that `SPARK_HOME` contains a
+Spark distribution. By default, `SPARK_HOME` comes from that interpreter's
+PySpark package, so PySpark, its Spark jars, and Python workers stay aligned.
+Set `SPARK_HOME` only when intentionally using another compatible Spark
+distribution. `SPARK_LOCAL_IP`, `PYSPARK_SUBMIT_ARGS`, and
+`PYTEST_CACHE_DIR` can also be overridden. Missing or incompatible setup
+fails with a preflight message; pytest failures and exit codes are preserved.
