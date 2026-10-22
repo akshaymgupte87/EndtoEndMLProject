@@ -32,6 +32,15 @@ def export_serving_artifacts(
 ) -> Path:
     model, metadata = load_two_tower_checkpoint(checkpoint, device="cpu")
     lineage = lineage or {}
+    if popularity_item_indices is not None and (
+        any(
+            isinstance(item, bool) or not isinstance(item, int)
+            or item < 0 or item >= model.num_items
+            for item in popularity_item_indices
+        )
+        or len(popularity_item_indices) != len(set(popularity_item_indices))
+    ):
+        raise ValueError("popularity fallback indices must be unique catalog indices")
     output.mkdir(parents=True, exist_ok=True)
     item_mapping_path = data / "item_mapping"
     from pyspark.sql import SparkSession
@@ -75,10 +84,6 @@ def export_serving_artifacts(
         seen.setdefault(str(source_to_local[int(row.user_idx)]), []).append(int(row.item_idx))
     (output / "seen_items.json").write_text(json.dumps(seen), encoding="utf-8")
     if popularity_item_indices is not None:
-        if len(popularity_item_indices) != len(set(popularity_item_indices)) or any(
-            item < 0 or item >= model.num_items for item in popularity_item_indices
-        ):
-            raise ValueError("popularity fallback indices must be unique catalog indices")
         (output / "popularity_item_indices.json").write_text(
             json.dumps(popularity_item_indices), encoding="utf-8"
         )

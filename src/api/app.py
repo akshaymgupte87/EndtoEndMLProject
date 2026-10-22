@@ -78,11 +78,47 @@ def load_runtime(model_dir: Path) -> dict:
     item_ids = json.loads((model_dir / "item_ids.json").read_text(encoding="utf-8"))
     user_ids = json.loads((model_dir / "user_ids.json").read_text(encoding="utf-8"))
     seen = json.loads((model_dir / "seen_items.json").read_text(encoding="utf-8"))
+    if not isinstance(item_ids, list) or not isinstance(user_ids, list):
+        raise ValueError("serving item and user IDs must be JSON arrays")
     vectors = np.load(model_dir / "item_vectors.npy", mmap_mode="r")
     if vectors.shape != (model.num_items, model.embedding_dim) or len(item_ids) != model.num_items:
         raise ValueError("serving item vectors/IDs do not match model dimensions")
+    if not np.issubdtype(vectors.dtype, np.floating) or not np.isfinite(vectors).all():
+        raise ValueError("serving item vectors must contain only finite floating-point values")
+    expected_vectors = model.item_embedding.weight.detach().cpu().numpy()
+    if not np.allclose(vectors, expected_vectors, rtol=1e-6, atol=1e-7):
+        raise ValueError("serving item vectors do not match the model checkpoint")
     if len(user_ids) != model.num_users:
         raise ValueError("serving user IDs do not match model dimensions")
+    if any(isinstance(source, bool) or not isinstance(source, int) for source in user_ids):
+        raise ValueError("serving user IDs must be integers")
+    if len(user_ids) != len(set(user_ids)):
+        raise ValueError("serving user IDs must be unique")
+    if any(not isinstance(item_id, str) or not item_id for item_id in item_ids):
+        raise ValueError("serving item IDs must be non-empty strings")
+    if len(item_ids) != len(set(item_ids)):
+        raise ValueError("serving item IDs must be unique")
+    if not isinstance(seen, dict):
+        raise ValueError("seen items must be a mapping from local users to item indices")
+    validated_seen: dict[int, set[int]] = {}
+    for raw_user, raw_items in seen.items():
+        try:
+            local_user = int(raw_user)
+        except (TypeError, ValueError) as error:
+            raise ValueError("seen-item user keys must be valid local user indices") from error
+        if str(local_user) != str(raw_user) or not 0 <= local_user < model.num_users:
+            raise ValueError("seen-item user index is outside the model user table")
+        if not isinstance(raw_items, list):
+            raise ValueError("seen items for each user must be a list of catalog indices")
+        if any(
+            isinstance(item, bool) or not isinstance(item, int)
+            or item < 0 or item >= model.num_items
+            for item in raw_items
+        ):
+            raise ValueError("seen item index is outside the model catalog")
+        if len(raw_items) != len(set(raw_items)):
+            raise ValueError("seen item indices for each user must be unique")
+        validated_seen[local_user] = set(raw_items)
     popularity_path = model_dir / "popularity_item_indices.json"
     popularity = (
         json.loads(popularity_path.read_text(encoding="utf-8"))
@@ -100,13 +136,55 @@ def load_runtime(model_dir: Path) -> dict:
         "serving_metadata": serving_metadata,
         "serving_policy": serving_metadata.get("serving_policy", "two_tower"),
         "item_ids": item_ids,
+        "cache_version": str(
+            serving_metadata.get("model_version")
+            or manifest.get("model_version")
+            or checksums["best_model.pt"]
+        ),
         "user_to_local": {int(source): local for local, source in enumerate(user_ids)},
-        "seen": {int(local): set(items) for local, items in seen.items()},
+        "seen": validated_seen,
         "item_vectors": torch.from_numpy(np.asarray(vectors).copy()),
         "popularity_item_indices": popularity,
         "cache": {},
         "redis": None,
     }
+
+
+def _decode_cached_recommendation(
+    cached: bytes | str,
+    *,
+    user_idx: int,
+    limit: int,
+    runtime: dict,
+    local_user_idx: int,
+) -> dict | None:
+    """Return a cache entry only when it satisfies the current serving contract."""
+    try:
+        result = json.loads(cached)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+        return None
+    if not isinstance(result, dict) or set(result) != {"user_idx", "items", "model"}:
+        return None
+    if (
+        isinstance(result["user_idx"], bool)
+        or not isinstance(result["user_idx"], int)
+        or result["user_idx"] != user_idx
+        or result["model"] != "two_tower"
+        or not isinstance(result["items"], list)
+        or len(result["items"]) > limit
+    ):
+        return None
+    items = result["items"]
+    valid_ids = set(runtime["item_ids"])
+    seen_indices = runtime["seen"].get(local_user_idx, set())
+    seen_ids = {runtime["item_ids"][idx] for idx in seen_indices}
+    if (
+        any(not isinstance(item, str) or item not in valid_ids for item in items)
+        or len(items) != len(set(items))
+        or not seen_ids.isdisjoint(items)
+    ):
+        return None
+    return result
 
 
 def create_app(model_dir: Path | None = None) -> FastAPI:
@@ -187,14 +265,23 @@ def create_app(model_dir: Path | None = None) -> FastAPI:
                 }
             cache_key = (local, limit)
             redis_client = runtime.get("redis")
-            redis_key = f"recommendations:{local}:{limit}"
+            redis_key = f"recommendations:{runtime['cache_version']}:{local}:{limit}"
             if redis_client is not None:
                 try:
                     cached = redis_client.get(redis_key)
                     if cached:
-                        CACHE_HITS.labels(backend="redis").inc()
-                        REQUESTS.labels(status="ok").inc()
-                        return json.loads(cached)
+                        cached_result = _decode_cached_recommendation(
+                            cached,
+                            user_idx=user_idx,
+                            limit=limit,
+                            runtime=runtime,
+                            local_user_idx=local,
+                        )
+                        if cached_result is not None:
+                            CACHE_HITS.labels(backend="redis").inc()
+                            REQUESTS.labels(status="ok").inc()
+                            return cached_result
+                        CACHE_ERRORS.inc()
                 except Exception:
                     # Cache is an optimization; a Redis outage must not take down serving.
                     CACHE_ERRORS.inc()

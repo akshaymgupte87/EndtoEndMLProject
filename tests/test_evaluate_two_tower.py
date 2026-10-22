@@ -33,6 +33,20 @@ def test_ranking_metrics_rejects_empty_relevance() -> None:
         ranking_metrics_at_k({0: [1]}, {0: set()}, k=10)
 
 
+def test_ranking_metrics_rejects_duplicate_recommendations() -> None:
+    with pytest.raises(ValueError, match="must be unique"):
+        ranking_metrics_at_k({0: [4, 4]}, {0: {4}}, k=2)
+
+
+@pytest.mark.parametrize(
+    "ranked,relevant",
+    [({0: [True]}, {0: {1}}), ({0: [1]}, {0: {False}}), ({0: [[1]]}, {0: {1}})],
+)
+def test_ranking_metrics_rejects_malformed_item_indices(ranked, relevant) -> None:
+    with pytest.raises(ValueError, match="non-negative integer"):
+        ranking_metrics_at_k(ranked, relevant, k=1)
+
+
 def test_recommend_top_k_excludes_each_users_training_items() -> None:
     model = TwoTowerRecommender(num_users=2, num_items=5, embedding_dim=1)
     with torch.no_grad():
@@ -89,6 +103,25 @@ def test_popularity_ranking_respects_shared_candidate_catalog() -> None:
     )
 
     assert ranked == {0: [2, 3]}
+
+
+def test_popularity_ranking_rejects_duplicate_catalog_items() -> None:
+    with pytest.raises(ValueError, match="popularity_order must contain unique"):
+        recommend_popular_top_k([0], [1, 1, 2], {}, k=2)
+
+
+@pytest.mark.parametrize(
+    "users,popularity,seen,candidates",
+    [
+        ([True], [0, 1], {}, None),
+        ([0], [False, 1], {}, None),
+        ([0], [0, 1], {0: {3}}, None),
+        ([0], [0, 1], {}, [2]),
+    ],
+)
+def test_popularity_ranking_rejects_inconsistent_indices(users, popularity, seen, candidates):
+    with pytest.raises(ValueError):
+        recommend_popular_top_k(users, popularity, seen, k=1, candidate_items=candidates)
 
 
 def test_metrics_by_cohort_reports_user_history_and_target_popularity_groups() -> None:

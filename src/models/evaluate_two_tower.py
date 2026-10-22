@@ -106,6 +106,14 @@ def ranking_metrics_at_k(
 ) -> dict[str, float | int]:
     """Compute macro-averaged Recall@K, Precision@K, and binary NDCG@K."""
     _validate_k(k)
+    for user_idx, ranked in ranked_items_by_user.items():
+        _validate_index_sequence(ranked, "ranked items")
+        if len(ranked) != len(set(ranked)):
+            raise ValueError(f"ranked items for user {user_idx} must be unique")
+    for user_idx, relevant in relevant_items_by_user.items():
+        _validate_index_sequence(relevant, "relevant items")
+        if isinstance(user_idx, bool) or not isinstance(user_idx, Integral) or user_idx < 0:
+            raise ValueError("user indices must be non-negative integers")
     evaluated_users = [
         user_idx for user_idx, relevant in relevant_items_by_user.items() if relevant
     ]
@@ -154,13 +162,33 @@ def recommend_popular_top_k(
 ) -> dict[int, list[int]]:
     """Return the same global popularity ranking with each user's seen items removed."""
     _validate_k(k)
+    popularity = list(popularity_order)
+    _validate_index_sequence(popularity, "popularity order")
+    if len(popularity) != len(set(popularity)):
+        raise ValueError("popularity_order must contain unique item indices")
+    allowed = None if candidate_items is None else list(candidate_items)
+    if allowed is not None:
+        _validate_index_sequence(allowed, "candidate items")
+        if len(allowed) != len(set(allowed)):
+            raise ValueError("candidate_items must contain unique item indices")
+        if not set(allowed).issubset(popularity):
+            raise ValueError("candidate_items must be present in popularity_order")
+    users = list(user_indices)
+    if any(isinstance(user, bool) or not isinstance(user, Integral) or user < 0 for user in users):
+        raise ValueError("user indices must be non-negative integers")
+    if len(users) != len(set(users)):
+        raise ValueError("user_indices must not contain duplicates")
     recommendations: dict[int, list[int]] = {}
-    allowed = None if candidate_items is None else set(candidate_items)
-    for user_idx in user_indices:
+    allowed_set = None if allowed is None else set(allowed)
+    popularity_set = set(popularity)
+    for user_idx in users:
         seen_items = seen_items_by_user.get(user_idx, frozenset())
+        _validate_index_sequence(seen_items, "seen item indices")
+        if not set(seen_items).issubset(popularity_set):
+            raise ValueError("seen items must be present in popularity_order")
         ranked: list[int] = []
-        for item_idx in popularity_order:
-            if allowed is not None and item_idx not in allowed:
+        for item_idx in popularity:
+            if allowed_set is not None and item_idx not in allowed_set:
                 continue
             if item_idx not in seen_items:
                 ranked.append(item_idx)
@@ -168,6 +196,14 @@ def recommend_popular_top_k(
                     break
         recommendations[user_idx] = ranked
     return recommendations
+
+
+def _validate_index_sequence(values: Sequence[int] | Set[int], name: str) -> None:
+    if any(
+        isinstance(value, bool) or not isinstance(value, Integral) or value < 0
+        for value in values
+    ):
+        raise ValueError(f"{name} must contain non-negative integer indices")
 
 
 def _metrics_by_cohort(

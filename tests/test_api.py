@@ -283,6 +283,144 @@ def test_api_rejects_manifest_missing_required_checksum(model_bundle):
         load_runtime(model_bundle)
 
 
+@pytest.mark.parametrize(
+    ("seen_payload", "message"),
+    [
+        ({"0": [3]}, "seen item index is outside"),
+        ({"2": [0]}, "seen-item user index is outside"),
+        ({"0": "0"}, "must be a list"),
+        ({"0": [0, 0]}, "must be unique"),
+    ],
+)
+def test_api_rejects_invalid_seen_item_bundle_indices(model_bundle, seen_payload, message):
+    from src.api.app import load_runtime
+
+    seen_path = model_bundle / "seen_items.json"
+    seen_path.write_text(json.dumps(seen_payload))
+    manifest = json.loads((model_bundle / "manifest.json").read_text())
+    manifest["files"]["seen_items.json"] = hashlib.sha256(seen_path.read_bytes()).hexdigest()
+    (model_bundle / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match=message):
+        load_runtime(model_bundle)
+
+
+def test_api_rejects_duplicate_source_user_ids(model_bundle):
+    from src.api.app import load_runtime
+
+    user_path = model_bundle / "user_ids.json"
+    user_path.write_text(json.dumps([77, 77]))
+    manifest = json.loads((model_bundle / "manifest.json").read_text())
+    manifest["files"]["user_ids.json"] = hashlib.sha256(user_path.read_bytes()).hexdigest()
+    (model_bundle / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="user IDs must be unique"):
+        load_runtime(model_bundle)
+
+
+@pytest.mark.parametrize("bad_vectors", ["non_finite", "mismatched"])
+def test_api_rejects_serving_vectors_inconsistent_with_checkpoint(model_bundle, bad_vectors):
+    from src.api.app import load_runtime
+
+    vector_path = model_bundle / "item_vectors.npy"
+    vectors = np.load(vector_path)
+    if bad_vectors == "non_finite":
+        vectors[0, 0] = np.nan
+        expected_error = "finite floating-point"
+    else:
+        vectors[0, 0] += 1.0
+        expected_error = "do not match the model checkpoint"
+    np.save(vector_path, vectors)
+    manifest = json.loads((model_bundle / "manifest.json").read_text())
+    manifest["files"]["item_vectors.npy"] = hashlib.sha256(vector_path.read_bytes()).hexdigest()
+    (model_bundle / "manifest.json").write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match=expected_error):
+        load_runtime(model_bundle)
+
+
+@pytest.mark.parametrize(
+    "cached",
+    [
+        b"not-json",
+        json.dumps({"user_idx": 88, "items": ["item-a"], "model": "two_tower"}),
+        json.dumps({"user_idx": 77, "items": ["unknown"], "model": "two_tower"}),
+        json.dumps({"user_idx": 77, "items": ["item-a"], "model": "two_tower"}),
+        json.dumps({"user_idx": 77, "items": ["item-b", "item-b"], "model": "two_tower"}),
+        json.dumps({"user_idx": 77, "items": ["item-b"], "model": "popularity_fallback"}),
+    ],
+)
+def test_api_ignores_invalid_redis_recommendation_and_recomputes(model_bundle, cached):
+    class InvalidCache:
+        def get(self, _key):
+            return cached
+
+        def setex(self, *_args):
+            pass
+
+        def close(self):
+            pass
+
+    app = create_app(model_bundle)
+
+    async def run():
+        async with app.router.lifespan_context(app):
+            app.state.runtime["redis"] = InvalidCache()
+            status, body = await _request(app, "/recommendations/77?limit=2")
+            assert status == 200
+            result = json.loads(body)
+            assert result == {
+                "user_idx": 77,
+                "items": ["item-b", "item-c"],
+                "model": "two_tower",
+            }
+
+    asyncio.run(run())
+
+
+def test_api_redis_cache_keys_are_scoped_to_model_version(model_bundle, tmp_path, monkeypatch):
+    import shutil
+
+    second_bundle = tmp_path / "second-model"
+    shutil.copytree(model_bundle, second_bundle)
+    metadata_path = second_bundle / "model_metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["model_version"] = "version-two"
+    metadata_path.write_text(json.dumps(metadata))
+    manifest_path = second_bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"]["model_metadata.json"] = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    observed_keys = []
+
+    class SharedCache:
+        def get(self, key):
+            observed_keys.append(key)
+            return None
+
+        def setex(self, *_args):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("REDIS_URL", "redis://cache.invalid:6379/0")
+    monkeypatch.setitem(
+        sys.modules,
+        "redis",
+        SimpleNamespace(Redis=SimpleNamespace(from_url=lambda *_args, **_kwargs: SharedCache())),
+    )
+    apps = [create_app(model_bundle), create_app(second_bundle)]
+
+    async def run():
+        for app in apps:
+            async with app.router.lifespan_context(app):
+                status, _ = await _request(app, "/recommendations/77?limit=2")
+                assert status == 200
+
+    asyncio.run(run())
+    assert len(observed_keys) == 2
+    assert observed_keys[0] != observed_keys[1]
+
+
 def test_bedrock_explanation_uses_selected_recommendations(model_bundle, monkeypatch):
     calls = {}
 

@@ -14,6 +14,8 @@ def mean_and_sample_std(values: list[float]) -> tuple[float, float]:
     """Return arithmetic mean and sample standard deviation."""
     if not values:
         raise ValueError("at least one metric value is required")
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("metric values must all be finite")
     mean = sum(values) / len(values)
     if len(values) == 1:
         return mean, 0.0
@@ -29,10 +31,25 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _metric_rows(report: dict[str, Any], model_key: str) -> dict[str, dict[str, float]]:
-    return {
-        str(k): {name: float(value) for name, value in metrics.items() if name != "users"}
-        for k, metrics in report["metrics_at_k"][model_key].items()
-    }
+    try:
+        metrics_by_k = report["metrics_at_k"][model_key]
+        result = {
+            str(k): {
+                name: float(value)
+                for name, value in metrics.items()
+                if name != "users"
+            }
+            for k, metrics in metrics_by_k.items()
+        }
+    except (KeyError, AttributeError, TypeError, ValueError) as error:
+        raise ValueError(f"invalid metrics for model '{model_key}'") from error
+    if any(
+        not math.isfinite(value)
+        for metrics in result.values()
+        for value in metrics.values()
+    ):
+        raise ValueError(f"metrics for model '{model_key}' must be finite")
+    return result
 
 
 def _cohort_metric_rows(

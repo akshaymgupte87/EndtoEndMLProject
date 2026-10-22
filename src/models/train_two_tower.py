@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 from dataclasses import asdict, dataclass
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -37,12 +39,25 @@ class TrainingConfig:
     device: str = "cpu"
 
     def validate(self) -> None:
+        integer_parameters = (self.embedding_dim, self.batch_size, self.epochs, self.seed)
+        if any(isinstance(value, bool) or not isinstance(value, Integral) for value in integer_parameters):
+            raise TypeError("embedding_dim, batch_size, epochs, and seed must be integers")
         if self.embedding_dim < 1 or self.batch_size < 1 or self.epochs < 1:
             raise ValueError("embedding_dim, batch_size, and epochs must be positive")
-        if self.learning_rate <= 0:
-            raise ValueError("learning_rate must be positive")
-        if self.weight_decay < 0:
-            raise ValueError("weight_decay must be non-negative")
+        if (
+            isinstance(self.learning_rate, bool)
+            or not isinstance(self.learning_rate, Real)
+            or not math.isfinite(self.learning_rate)
+            or self.learning_rate <= 0
+        ):
+            raise ValueError("learning_rate must be finite and positive")
+        if (
+            isinstance(self.weight_decay, bool)
+            or not isinstance(self.weight_decay, Real)
+            or not math.isfinite(self.weight_decay)
+            or self.weight_decay < 0
+        ):
+            raise ValueError("weight_decay must be finite and non-negative")
         if self.device not in {"cpu", "cuda"}:
             raise ValueError("device must be 'cpu' or 'cuda'")
         if self.device == "cuda" and not torch.cuda.is_available():
@@ -153,8 +168,43 @@ def train_two_tower(
     config.validate()
     if not train_pairs or not validation_pairs:
         raise ValueError("both training and validation pairs must be non-empty")
+    if any(
+        isinstance(value, bool) or not isinstance(value, Integral)
+        for value in (num_users, num_items)
+    ):
+        raise TypeError("num_users and num_items must be integers")
+    if num_users < 1 or num_items < 2:
+        raise ValueError("num_users must be positive and num_items must be at least two")
+
+    def validate_pairs(pairs: list[tuple[int, int]], name: str) -> set[tuple[int, int]]:
+        normalized: set[tuple[int, int]] = set()
+        for pair in pairs:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise ValueError(f"each {name} pair must contain exactly two indices")
+            user_idx, item_idx = pair
+            for value, label, upper in (
+                (user_idx, "user", num_users),
+                (item_idx, "item", num_items),
+            ):
+                if isinstance(value, bool) or not isinstance(value, Integral):
+                    raise TypeError(f"{name} {label} indices must be integers")
+                if value < 0 or value >= upper:
+                    raise ValueError(f"{name} {label} index is outside the model dimensions")
+            normalized.add((int(user_idx), int(item_idx)))
+        return normalized
+
+    train_pair_set = validate_pairs(train_pairs, "training")
+    validation_pair_set = validate_pairs(validation_pairs, "validation")
+    if train_pair_set & validation_pair_set:
+        raise ValueError("training and validation pairs must not overlap")
+    training_users = {user_idx for user_idx, _ in train_pair_set}
+    validation_users = {user_idx for user_idx, _ in validation_pair_set}
+    if not validation_users.issubset(training_users):
+        raise ValueError("every validation user must have training interactions")
     if model_user_ids is None:
         model_user_ids = list(range(num_users))
+    if any(isinstance(value, bool) or not isinstance(value, Integral) for value in model_user_ids):
+        raise TypeError("model_user_ids must contain integer source IDs")
     if len(model_user_ids) != num_users or len(set(model_user_ids)) != num_users:
         raise ValueError("model_user_ids must contain one unique source ID per model user")
 

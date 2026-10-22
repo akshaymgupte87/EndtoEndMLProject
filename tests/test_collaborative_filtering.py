@@ -10,7 +10,7 @@ from src.models.collaborative_filtering import (
     _localize_user_factors,
     recommend_top_k_als,
 )
-from src.models.summarize_comparison import mean_and_sample_std
+from src.models.summarize_comparison import _metric_rows, mean_and_sample_std
 
 
 def test_als_top_k_uses_factor_similarity_and_removes_seen_items() -> None:
@@ -67,3 +67,21 @@ def test_mean_and_sample_std_summarizes_seed_metrics() -> None:
 
     assert mean == pytest.approx(2.0)
     assert sample_std == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_comparison_summary_rejects_non_finite_seed_metrics(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        mean_and_sample_std([0.2, value])
+
+
+def test_comparison_summary_rejects_non_finite_report_metric() -> None:
+    report = {"metrics_at_k": {"tower": {"10": {"recall": float("nan")}}}}
+
+    with pytest.raises(ValueError, match="must be finite"):
+        _metric_rows(report, "tower")
+
+
+def test_comparison_summary_reports_missing_metric_shape_clearly() -> None:
+    with pytest.raises(ValueError, match="invalid metrics"):
+        _metric_rows({}, "tower")
