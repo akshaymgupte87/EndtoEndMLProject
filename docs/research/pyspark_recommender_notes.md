@@ -4,6 +4,15 @@ These notes explain the decisions and PySpark concepts used in the recommender n
 
 ## Reading order
 
+For the ML infrastructure lab, follow the
+[study guide](../guides/two_tower_study_guide.md#ml-infrastructure-lab-2026-11-16)
+and [runnable demonstration](../guides/ml_infrastructure_demo.md). Run
+`python infrastructure_demo.py` from the repository root to reproduce seeded
+MLflow runs, exercise validation-only registration gates, and measure uncached
+and cached FastAPI ASGI latency. This synthetic lab does not start Spark or
+benchmark its data preparation; keep its quality and latency results separate
+from the real-data experiments described in these notes.
+
 - Start with [README.md](../README.md) for the current project state.
 - Use this file for Spark concepts, data preparation, time splits, and WSL
   troubleshooting.

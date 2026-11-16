@@ -88,6 +88,34 @@ has been measured.
 
 ## Architecture and the reasons behind it
 
+### Explaining the ML infrastructure evidence
+
+> I added a runnable synthetic infrastructure check that separates checkpoint
+> selection from registration. Training keeps the lowest validation BPR loss;
+> registration requires at least 5% validation NDCG@10 lift over matched
+> popularity and no Recall@10 regression. Two seed-42 CPU runs reproduced the
+> same weights and validation results, with configuration, artifacts and
+> environment versions recorded in MLflow. I exercised successful candidate
+> registration and rejection of test-split and zero-lift reports. For FastAPI,
+> 200 sequential in-process requests per mode measured p95 of 1.27 ms uncached
+> and 1.67 ms memory-cached. These are synthetic local measurements, not
+> network latency or production capacity.
+
+Reproduce this with `python infrastructure_demo.py`; inspect
+`artifacts/ml_infrastructure/evidence.json` and the two MLflow run IDs.
+The [lab guide](ml_infrastructure_demo.md) records commands and limitations.
+The synthetic registry entry is separate from the real-data checkpoint.
+Registration is not deployment, and report-to-checkpoint binding and latency
+release gates are not implemented. The shared helper computes test metrics,
+but the registration decision uses validation targets only.
+
+Keep these timings separate from the earlier Docker/Redis smoke measurements:
+the new benchmark excludes sockets, TLS, startup and Redis. Its small cached
+sample does not establish a speedup. The next serving experiment should measure
+the HTTP endpoint under representative concurrency, catalog size, and Redis
+failure/recovery conditions. The focused registration, tracking and API test
+selection passed 30 tests; the full Spark suite was not rerun for this lab.
+
 ```mermaid
 flowchart LR
     A[Historical interaction data] --> B[PySpark preparation]

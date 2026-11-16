@@ -55,6 +55,62 @@ honest discussion of impact and limitations, see the
 
 ## Concept map: what this project teaches so far
 
+### ML infrastructure lab (2026-11-16)
+
+Run `python infrastructure_demo.py` from the repository root with the project
+environment active and `REDIS_URL` unset. This runs without starting Spark,
+Docker, or AWS. Follow the [lab guide](ml_infrastructure_demo.md) for setup,
+MLflow UI commands, and the recorded measurement protocol. The implementation
+is [infrastructure_demo.py](../../infrastructure_demo.py).
+
+Learn the distinction between these decisions:
+
+| Decision | Criterion | Evidence to inspect |
+|---|---|---|
+| Which training checkpoint to keep | Lowest sampled validation BPR loss | Best epoch and training log in `repeat_0/run_report.json` |
+| Whether it qualifies for registration | Validation NDCG@10 at least 5% above matched popularity, with no Recall@10 regression | `repeat_0/validation_metrics.json` and registration result |
+| Whether a repeated run reproduces the result | Equal dataset hashes, tensor hashes and validation reports | Two run IDs and `reproducible` in `evidence.json`; persisted MLflow metrics are read back |
+| How fast inference is locally | Measured p50/p95/p99 for uncached and memory-cached requests | Raw timing samples in `evidence.json` |
+
+All paths above are under `artifacts/ml_infrastructure`. The two repeat runs
+use seed 42, CPU deterministic algorithms and one Torch thread. MLflow stores
+configuration, hashes, checkpoint, manifest, validation metrics and environment
+versions. Tensor hashes compare weights rather than serialized archive bytes.
+Matching repeats demonstrate repeatability in this environment; they do not
+prove statistical significance or portability across machines.
+
+The gate also rejects test-split and zero-lift reports. It requires finite
+metrics and a positive baseline NDCG. The synthetic candidate passed and was
+registered as `synthetic-infrastructure-demo`, version 1 with alias `candidate`.
+This registry entry is separate from the historical real-data checkpoint.
+Registration does not deploy the model. The registration helper trusts the
+supplied report; cryptographic binding between report and checkpoint and a
+latency release gate remain future work.
+
+The recorded synthetic validation NDCG@10 was 0.650912 versus 0.113771 for
+popularity; Recall@10 was 1.0 versus 0.270833. Both repeats selected epoch 23.
+These deliberately learnable generated interactions test the workflow, not
+real-data quality. The shared demo helper also computes test metrics, but
+registration uses validation targets only.
+
+On 2026-11-16, 200 sequential requests per mode after 20 warmups measured
+uncached p50/p95/p99 of 0.89/1.27/1.35 ms and memory-cached values of
+0.83/1.67/2.23 ms. The timer covers the in-process FastAPI ASGI request and
+response serialization. It excludes startup, network, TLS and proxies. The
+uncached mode clears the memory cache outside the timed region. These small
+samples do not demonstrate a cache speedup or establish a production SLO.
+The Prometheus handler histogram has a narrower timing scope and should not
+be treated as the same measurement.
+
+Practice explaining: Why can low BPR loss still fail the ranking gate? Why
+must both rankers share candidates and seen-item exclusions? Why does a fixed
+seed need a recorded environment? Why is cached p95 allowed to be higher in
+a small local sample? What additional evidence would justify deployment?
+
+The demonstration completed successfully, and the focused registration,
+tracking and API test selection passed 30 tests. This count describes that
+selection, not a new full Spark-suite run.
+
 Use this map to distinguish three states: **implemented** means runnable
 project code and/or a measured experiment exists; **partial** means the code
 shows one useful piece but not a full production treatment; **planned** means

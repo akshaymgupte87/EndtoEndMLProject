@@ -123,6 +123,11 @@ full-catalog metrics. Results and caveats are in the
 
 ## Project status and roadmap
 
+For a runnable demonstration of selection criteria, registration gates,
+repeated MLflow results and measured FastAPI latency, run
+`python infrastructure_demo.py` and follow the
+[ML infrastructure demonstration](docs/guides/ml_infrastructure_demo.md).
+
 [PLAN.md](PLAN.md) defines the production portfolio goal, current evidence,
 phase-by-phase exit criteria, and immediate priority order. The work is
 organized around reproducible ML evidence, safe serving, CI and release
